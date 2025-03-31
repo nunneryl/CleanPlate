@@ -32,6 +32,8 @@ def search():
     name = sanitize_input(name)
     transformed_name = name.replace("s", "'s")
 
+    logger.info(f"Processing search for term: {name}")
+    
     query = """
         SELECT restaurants.camis, restaurants.dba, restaurants.boro, restaurants.building, restaurants.street,
                restaurants.zipcode, restaurants.phone, restaurants.latitude, restaurants.longitude,
@@ -40,30 +42,21 @@ def search():
         FROM restaurants
         LEFT JOIN violations ON restaurants.camis = violations.camis AND restaurants.inspection_date = violations.inspection_date
         WHERE restaurants.dba ILIKE %s OR restaurants.dba ILIKE %s
-        ORDER BY 
-            CASE 
-                WHEN restaurants.dba ILIKE %s THEN 0  -- Exact match
-                WHEN restaurants.dba ILIKE %s THEN 1  -- Starts with search term
-                WHEN restaurants.dba ILIKE %s THEN 2  -- Contains search term as a whole word
-                ELSE 3                                -- Contains search term as part of another word
-            END,
-            restaurants.dba  -- Then sort alphabetically
+        ORDER BY restaurants.dba ASC
     """
-    
-    # Parameters need to match the number of placeholders
-    search_term = f"%{name}%"
-    exact_match = name
-    starts_with = f"{name}%"
-    contains_word = f"% {name} %"
-    
-    params = [search_term, f"%{transformed_name}%", exact_match, starts_with, contains_word]
+    params = [f"%{name}%", f"%{transformed_name}%"]
 
     try:
+        logger.info("Attempting database connection")
         with DatabaseConnection() as conn:
+            logger.info("Database connection successful")
             with conn.cursor() as cursor:
+                logger.info("Executing search query")
                 cursor.execute(query, params)
                 results = cursor.fetchall()
                 columns = [desc[0] for desc in cursor.description]
+                
+                logger.info(f"Query returned {len(results)} results")
                 
                 if not results:
                     logger.info(f"No results for search term: {name}")
@@ -114,6 +107,7 @@ def search():
                     restaurant["inspections"] = list(restaurant["inspections"].values())
                     formatted_results.append(restaurant)
 
+                logger.info(f"Returning {len(formatted_results)} formatted restaurant results")
                 return jsonify(formatted_results)
                 
     except Exception as e:
