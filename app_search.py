@@ -42,9 +42,24 @@ def search():
         FROM restaurants
         LEFT JOIN violations ON restaurants.camis = violations.camis AND restaurants.inspection_date = violations.inspection_date
         WHERE restaurants.dba ILIKE %s OR restaurants.dba ILIKE %s
-        ORDER BY restaurants.dba ASC
+        ORDER BY 
+            CASE 
+                WHEN LOWER(restaurants.dba) = LOWER(%s) THEN 0  -- Exact match
+                WHEN LOWER(restaurants.dba) LIKE LOWER(%s) THEN 1  -- Starts with search term
+                WHEN LOWER(restaurants.dba) LIKE LOWER(%s) THEN 2  -- Contains search term as a whole word
+                ELSE 3                                -- Contains search term as part of another word
+            END,
+            restaurants.dba  -- Then sort alphabetically
     """
-    params = [f"%{name}%", f"%{transformed_name}%"]
+
+    # Parameters with correct count
+    params = [
+        f"%{name}%",               # First WHERE condition
+        f"%{transformed_name}%",   # Second WHERE condition
+        name,                      # Exact match
+        f"{name}%",                # Starts with
+        f"% {name} %",             # Contains as whole word
+    ]
 
     try:
         logger.info("Attempting database connection")
