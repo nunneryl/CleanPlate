@@ -40,9 +40,23 @@ def search():
         FROM restaurants
         LEFT JOIN violations ON restaurants.camis = violations.camis AND restaurants.inspection_date = violations.inspection_date
         WHERE restaurants.dba ILIKE %s OR restaurants.dba ILIKE %s
-        ORDER BY restaurants.dba, restaurants.inspection_date DESC
+        ORDER BY 
+            CASE 
+                WHEN restaurants.dba ILIKE %s THEN 0  -- Exact match
+                WHEN restaurants.dba ILIKE %s THEN 1  -- Starts with search term
+                WHEN restaurants.dba ILIKE %s THEN 2  -- Contains search term as a whole word
+                ELSE 3                                -- Contains search term as part of another word
+            END,
+            restaurants.dba  -- Then sort alphabetically
     """
-    params = [f"%{name}%", f"%{transformed_name}%"]
+    
+    # Parameters need to match the number of placeholders
+    search_term = f"%{name}%"
+    exact_match = name
+    starts_with = f"{name}%"
+    contains_word = f"% {name} %"
+    
+    params = [search_term, f"%{transformed_name}%", exact_match, starts_with, contains_word]
 
     try:
         with DatabaseConnection() as conn:
@@ -136,6 +150,16 @@ def recent_restaurants():
     except Exception as e:
         logger.error(f"Error fetching recent restaurants: {e}")
         return jsonify({"error": str(e), "status": "error"}), 500
+
+@app.route('/test-db-connection', methods=['GET'])
+def test_db_connection():
+    try:
+        with DatabaseConnection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                return jsonify({"status": "success", "message": "Database connection successful"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.errorhandler(404)
 def not_found(e):
