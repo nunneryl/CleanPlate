@@ -26,7 +26,7 @@ def sanitize_input(input_str):
     # Create a version with periods removed for abbreviations (E.J. -> EJ)
     no_periods_version = input_str.replace(".", "")
     
-    # Keep the standard sanitization for the original input
+    # Keep the standard sanitization for both versions
     sanitized_input = re.sub(r"[^\w\s'.]", "", input_str)
     no_periods_sanitized = re.sub(r"[^\w\s']", "", no_periods_version)
     
@@ -42,11 +42,22 @@ def search():
     # Get both sanitized versions of the input
     name_with_periods, name_without_periods = sanitize_input(name)
     
+    # Important: Also create a version WITH periods even if the input doesn't have them
+    # This handles searching "EJ" and finding "E.J's"
+    if '.' not in name and len(name) >= 2:
+        # Try adding periods between characters for abbreviation matching
+        # E.g., "EJ" -> "E.J"
+        with_periods_guess = '.'.join(list(name_without_periods))
+        name_with_added_periods = with_periods_guess
+    else:
+        name_with_added_periods = name_with_periods
+    
     # Create transformed versions with 's
     transformed_name = name_with_periods.replace("s", "'s")
     transformed_name_no_periods = name_without_periods.replace("s", "'s")
+    transformed_with_added_periods = name_with_added_periods.replace("s", "'s")
     
-    logger.info(f"Search input: '{name}', Sanitized: '{name_with_periods}', No periods: '{name_without_periods}'")
+    logger.info(f"Search input: '{name}', Sanitized: '{name_with_periods}', No periods: '{name_without_periods}', With added periods: '{name_with_added_periods}'")
 
     query = """
         SELECT restaurants.camis, restaurants.dba, restaurants.boro, restaurants.building, restaurants.street,
@@ -58,15 +69,16 @@ def search():
         WHERE restaurants.dba ILIKE %s OR 
               restaurants.dba ILIKE %s OR
               restaurants.dba ILIKE %s OR
+              restaurants.dba ILIKE %s OR
               restaurants.dba ILIKE %s
         ORDER BY 
             CASE 
-                WHEN UPPER(restaurants.dba) = UPPER(%s) THEN 0  -- Exact match with periods
+                WHEN UPPER(restaurants.dba) = UPPER(%s) THEN 0  -- Exact match with original
                 WHEN UPPER(restaurants.dba) = UPPER(%s) THEN 0  -- Exact match without periods
-                WHEN UPPER(restaurants.dba) LIKE UPPER(%s) THEN 1  -- Starts with search term with periods
-                WHEN UPPER(restaurants.dba) LIKE UPPER(%s) THEN 1  -- Starts with search term without periods
-                WHEN UPPER(restaurants.dba) LIKE UPPER(%s) THEN 2  -- Contains search term as a whole word
-                ELSE 3                                             -- Contains search term as part of another word
+                WHEN UPPER(restaurants.dba) LIKE UPPER(%s) THEN 1  -- Starts with original
+                WHEN UPPER(restaurants.dba) LIKE UPPER(%s) THEN 1  -- Starts with no periods
+                WHEN UPPER(restaurants.dba) LIKE UPPER(%s) THEN 1  -- Starts with added periods
+                ELSE 3                                             -- Other matches
             END,
             restaurants.dba  -- Then sort alphabetically
     """
@@ -76,16 +88,17 @@ def search():
         f"%{name_with_periods}%",           # Original term
         f"%{transformed_name}%",            # Original with 's
         f"%{name_without_periods}%",        # Without periods
-        f"%{transformed_name_no_periods}%"  # Without periods with 's
+        f"%{transformed_name_no_periods}%", # Without periods with 's
+        f"%{name_with_added_periods}%"      # With added periods (for EJ -> E.J)
     ]
     
     # Parameters for ORDER BY clause
     order_params = [
-        name_with_periods,                  # Exact match with periods
+        name_with_periods,                  # Exact match with original
         name_without_periods,               # Exact match without periods
-        f"{name_with_periods}%",            # Starts with (with periods)
-        f"{name_without_periods}%",         # Starts with (without periods)
-        f"% {name_with_periods} %"          # Contains word
+        f"{name_with_periods}%",            # Starts with original
+        f"{name_without_periods}%",         # Starts with no periods
+        f"{name_with_added_periods}%"       # Starts with added periods
     ]
     
     params = where_params + order_params
