@@ -18,13 +18,20 @@ CORS(app)  # Enable CORS for all origins
 
 def sanitize_input(input_str):
     if not input_str:
-        return ""
+        return "", ""
+    
     # Normalize curly apostrophes to straight ones
     input_str = input_str.replace("'", "'").replace("'", "'")
-    # Remove periods that might be in abbreviations (e.g., E.J's -> EJs)
-    input_str = input_str.replace(".", "")
-    # Keep apostrophes, spaces, alphanumeric characters
-    return re.sub(r"[^\w\s']", "", input_str)
+    
+    # Create a version with periods removed for abbreviations (E.J. -> EJ)
+    no_periods_version = input_str.replace(".", "")
+    
+    # Keep the standard sanitization for the original input
+    sanitized_input = re.sub(r"[^\w\s'.]", "", input_str)
+    no_periods_sanitized = re.sub(r"[^\w\s']", "", no_periods_version)
+    
+    # Return both versions for use in search
+    return sanitized_input, no_periods_sanitized
 
 @app.route('/search', methods=['GET'])
 def search():
@@ -32,24 +39,14 @@ def search():
     if not name:
         return jsonify({"error": "Search term is empty", "status": "error"}), 400
 
-    # Sanitize and prepare search term variations
-    name = sanitize_input(name)
+    # Get both sanitized versions of the input
+    name_with_periods, name_without_periods = sanitize_input(name)
     
-    # Create additional search patterns
-    # 1. Original with 's added where applicable
-    transformed_name_s = name.replace("s", "'s")
+    # Create transformed versions with 's
+    transformed_name = name_with_periods.replace("s", "'s")
+    transformed_name_no_periods = name_without_periods.replace("s", "'s")
     
-    # 2. Version with apostrophes removed
-    no_apostrophe_name = name.replace("'", "")
-    
-    # 3. Version with spaces removed (for joined terms like EJ's -> EJs)
-    compressed_name = name.replace(" ", "")
-    
-    # 4. Version that's just the initials (e.g., "E.J" from "E.J's Luncheonette")
-    initials_match = re.match(r"([A-Za-z][\.]?[A-Za-z][\.]?)", name)
-    initials = initials_match.group(1) if initials_match else ""
-
-    logger.info(f"Search term: '{name}', Variations: '{transformed_name_s}', '{no_apostrophe_name}', '{compressed_name}', Initials: '{initials}'")
+    logger.info(f"Search input: '{name}', Sanitized: '{name_with_periods}', No periods: '{name_without_periods}'")
 
     query = """
         SELECT restaurants.camis, restaurants.dba, restaurants.boro, restaurants.building, restaurants.street,
@@ -58,38 +55,40 @@ def search():
                restaurants.inspection_type, violations.violation_code, violations.violation_description
         FROM restaurants
         LEFT JOIN violations ON restaurants.camis = violations.camis AND restaurants.inspection_date = violations.inspection_date
-        WHERE 
-            restaurants.dba ILIKE %s OR 
-            restaurants.dba ILIKE %s OR 
-            restaurants.dba ILIKE %s OR 
-            restaurants.dba ILIKE %s OR
-            restaurants.dba ILIKE %s
+        WHERE restaurants.dba ILIKE %s OR 
+              restaurants.dba ILIKE %s OR
+              restaurants.dba ILIKE %s OR
+              restaurants.dba ILIKE %s
         ORDER BY 
             CASE 
-                WHEN UPPER(restaurants.dba) = UPPER(%s) THEN 0  -- Exact match
-                WHEN UPPER(restaurants.dba) LIKE UPPER(%s) THEN 1  -- Starts with search term
+                WHEN UPPER(restaurants.dba) = UPPER(%s) THEN 0  -- Exact match with periods
+                WHEN UPPER(restaurants.dba) = UPPER(%s) THEN 0  -- Exact match without periods
+                WHEN UPPER(restaurants.dba) LIKE UPPER(%s) THEN 1  -- Starts with search term with periods
+                WHEN UPPER(restaurants.dba) LIKE UPPER(%s) THEN 1  -- Starts with search term without periods
                 WHEN UPPER(restaurants.dba) LIKE UPPER(%s) THEN 2  -- Contains search term as a whole word
-                ELSE 3                                -- Contains search term as part of another word
+                ELSE 3                                             -- Contains search term as part of another word
             END,
             restaurants.dba  -- Then sort alphabetically
     """
     
-    # Parameters for the WHERE clause
-    search_term = f"%{name}%"  # Original term
-    transformed_s_term = f"%{transformed_name_s}%"  # With 's
-    no_apostrophe_term = f"%{no_apostrophe_name}%"  # Without apostrophes
-    compressed_term = f"%{compressed_name}%"  # Without spaces
-    initials_term = f"%{initials}%" if initials else "%_NONEXISTENT_%"  # Just initials
-    
-    # Parameters for the ORDER BY clause
-    exact_match = name
-    starts_with = f"{name}%"
-    contains_word = f"% {name} %"
-    
-    params = [
-        search_term, transformed_s_term, no_apostrophe_term, compressed_term, initials_term,  # WHERE params
-        exact_match, starts_with, contains_word  # ORDER BY params
+    # Parameters for WHERE clause
+    where_params = [
+        f"%{name_with_periods}%",           # Original term
+        f"%{transformed_name}%",            # Original with 's
+        f"%{name_without_periods}%",        # Without periods
+        f"%{transformed_name_no_periods}%"  # Without periods with 's
     ]
+    
+    # Parameters for ORDER BY clause
+    order_params = [
+        name_with_periods,                  # Exact match with periods
+        name_without_periods,               # Exact match without periods
+        f"{name_with_periods}%",            # Starts with (with periods)
+        f"{name_without_periods}%",         # Starts with (without periods)
+        f"% {name_with_periods} %"          # Contains word
+    ]
+    
+    params = where_params + order_params
 
     try:
         with DatabaseConnection() as conn:
