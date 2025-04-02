@@ -19,8 +19,11 @@ CORS(app)  # Enable CORS for all origins
 def sanitize_input(input_str):
     if not input_str:
         return ""
-    # Normalize curly apostrophes to straight ones and remove unwanted characters
+    # Normalize curly apostrophes to straight ones
     input_str = input_str.replace("'", "'").replace("'", "'")
+    # Remove periods that might be in abbreviations (e.g., E.J's -> EJs)
+    input_str = input_str.replace(".", "")
+    # Keep apostrophes, spaces, alphanumeric characters
     return re.sub(r"[^\w\s']", "", input_str)
 
 @app.route('/search', methods=['GET'])
@@ -29,11 +32,25 @@ def search():
     if not name:
         return jsonify({"error": "Search term is empty", "status": "error"}), 400
 
+    # Sanitize and prepare search term variations
     name = sanitize_input(name)
-    transformed_name = name.replace("s", "'s")
-
-    logger.info(f"Processing search for term: {name}")
     
+    # Create additional search patterns
+    # 1. Original with 's added where applicable
+    transformed_name_s = name.replace("s", "'s")
+    
+    # 2. Version with apostrophes removed
+    no_apostrophe_name = name.replace("'", "")
+    
+    # 3. Version with spaces removed (for joined terms like EJ's -> EJs)
+    compressed_name = name.replace(" ", "")
+    
+    # 4. Version that's just the initials (e.g., "E.J" from "E.J's Luncheonette")
+    initials_match = re.match(r"([A-Za-z][\.]?[A-Za-z][\.]?)", name)
+    initials = initials_match.group(1) if initials_match else ""
+
+    logger.info(f"Search term: '{name}', Variations: '{transformed_name_s}', '{no_apostrophe_name}', '{compressed_name}', Initials: '{initials}'")
+
     query = """
         SELECT restaurants.camis, restaurants.dba, restaurants.boro, restaurants.building, restaurants.street,
                restaurants.zipcode, restaurants.phone, restaurants.latitude, restaurants.longitude,
@@ -41,37 +58,45 @@ def search():
                restaurants.inspection_type, violations.violation_code, violations.violation_description
         FROM restaurants
         LEFT JOIN violations ON restaurants.camis = violations.camis AND restaurants.inspection_date = violations.inspection_date
-        WHERE restaurants.dba ILIKE %s OR restaurants.dba ILIKE %s
+        WHERE 
+            restaurants.dba ILIKE %s OR 
+            restaurants.dba ILIKE %s OR 
+            restaurants.dba ILIKE %s OR 
+            restaurants.dba ILIKE %s OR
+            restaurants.dba ILIKE %s
         ORDER BY 
             CASE 
-                WHEN LOWER(restaurants.dba) = LOWER(%s) THEN 0  -- Exact match
-                WHEN LOWER(restaurants.dba) LIKE LOWER(%s) THEN 1  -- Starts with search term
-                WHEN LOWER(restaurants.dba) LIKE LOWER(%s) THEN 2  -- Contains search term as a whole word
+                WHEN UPPER(restaurants.dba) = UPPER(%s) THEN 0  -- Exact match
+                WHEN UPPER(restaurants.dba) LIKE UPPER(%s) THEN 1  -- Starts with search term
+                WHEN UPPER(restaurants.dba) LIKE UPPER(%s) THEN 2  -- Contains search term as a whole word
                 ELSE 3                                -- Contains search term as part of another word
             END,
             restaurants.dba  -- Then sort alphabetically
     """
-
-    # Parameters with correct count
+    
+    # Parameters for the WHERE clause
+    search_term = f"%{name}%"  # Original term
+    transformed_s_term = f"%{transformed_name_s}%"  # With 's
+    no_apostrophe_term = f"%{no_apostrophe_name}%"  # Without apostrophes
+    compressed_term = f"%{compressed_name}%"  # Without spaces
+    initials_term = f"%{initials}%" if initials else "%_NONEXISTENT_%"  # Just initials
+    
+    # Parameters for the ORDER BY clause
+    exact_match = name
+    starts_with = f"{name}%"
+    contains_word = f"% {name} %"
+    
     params = [
-        f"%{name}%",               # First WHERE condition
-        f"%{transformed_name}%",   # Second WHERE condition
-        name,                      # Exact match
-        f"{name}%",                # Starts with
-        f"% {name} %",             # Contains as whole word
+        search_term, transformed_s_term, no_apostrophe_term, compressed_term, initials_term,  # WHERE params
+        exact_match, starts_with, contains_word  # ORDER BY params
     ]
 
     try:
-        logger.info("Attempting database connection")
         with DatabaseConnection() as conn:
-            logger.info("Database connection successful")
             with conn.cursor() as cursor:
-                logger.info("Executing search query")
                 cursor.execute(query, params)
                 results = cursor.fetchall()
                 columns = [desc[0] for desc in cursor.description]
-                
-                logger.info(f"Query returned {len(results)} results")
                 
                 if not results:
                     logger.info(f"No results for search term: {name}")
@@ -122,7 +147,8 @@ def search():
                     restaurant["inspections"] = list(restaurant["inspections"].values())
                     formatted_results.append(restaurant)
 
-                logger.info(f"Returning {len(formatted_results)} formatted restaurant results")
+                # Log search results summary
+                logger.info(f"Search for '{name}' returned {len(formatted_results)} restaurants")
                 return jsonify(formatted_results)
                 
     except Exception as e:
