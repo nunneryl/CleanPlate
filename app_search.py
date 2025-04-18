@@ -48,19 +48,6 @@ app = Flask(__name__)
 CORS(app) # Enable CORS for all origins
 # --- End Flask App Initialization ---
 
-# --- Explicitly Initialize Database Pool ---
-try:
-    logger.info("Initializing database pool at app startup...")
-    DatabaseManager.initialize_pool()
-    logger.info("Database pool initialization attempt complete at startup.")
-except Exception as init_e:
-    # Log critical error if pool fails to initialize at startup
-    logger.critical(f"CRITICAL: Failed to initialize database pool at startup: {init_e}")
-    # Depending on requirements, you might want the app to exit if DB is essential
-    # import sys
-    # sys.exit(1)
-# --- End Explicit Initialization ---
-
 # --- Helper Functions ---
 def sanitize_input(input_str):
     """
