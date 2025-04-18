@@ -1,5 +1,5 @@
-    # gunicorn_config.py
-    import logging
+# gunicorn_config.py
+import logging
 
     # Optional: Configure Gunicorn's own logging if needed
     # You can customize log format, level, and output here
