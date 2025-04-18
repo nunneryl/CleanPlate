@@ -1,8 +1,10 @@
+# In config.py
 import os
 from dotenv import load_dotenv
-
-# Load environment variables from .env file if it exists
 load_dotenv()
+
+class SentryConfig:
+    SENTRY_DSN = os.environ.get("SENTRY_DSN", None) # Returns None if not set
 
 # Database configuration
 class DatabaseConfig:
