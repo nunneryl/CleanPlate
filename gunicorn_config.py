@@ -9,7 +9,7 @@ import logging
 
     # Server hook called just after a worker process has been successfully forked.
     # This is a reliable place to initialize resources needed by each worker.
-    def post_fork(server, worker):
+def post_fork(server, worker):
         # Use Gunicorn's logger for messages related to the hook itself
         server.log.info(f"Worker {worker.pid}: Initializing database pool via post_fork hook...")
         try:
