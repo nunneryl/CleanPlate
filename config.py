@@ -33,7 +33,7 @@ class RedisConfig:
     # Use the exact names shown in your Railway 'Variables' tab for the Redis service
     HOST = os.environ.get("REDISHOST", "redis.railway.internal")
     PORT = int(os.environ.get("REDISPORT", 6379)) # Convert port to integer
-    PASSWORD = os.environ.get("REDISPASSWORD", "sMBthrFlzwBhQKviLNiGDltFxAOmYsFt")
+    PASSWORD = os.environ.get("REDISPASSWORD", None)
     USER = os.environ.get("REDISUSER", "default") # Use 'default' if REDISUSER isn't set or needed
 
 
