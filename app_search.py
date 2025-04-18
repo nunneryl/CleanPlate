@@ -1,10 +1,51 @@
+# Near the top of app_search.py, after existing imports
+
 import os
 import re
 import logging
+import sentry_sdk # <-- Add Sentry SDK import
+from sentry_sdk.integrations.flask import FlaskIntegration # <-- Add Flask Integration import
 from flask import Flask, jsonify, request, make_response
 from flask_cors import CORS
 from db_manager import DatabaseConnection
-from config import APIConfig
+# Make sure your config import includes the class/way you load SENTRY_DSN
+from config import APIConfig, SentryConfig, DatabaseConfig # <-- Assuming SentryConfig loads SENTRY_DSN
+
+# --- Sentry Initialization Block ---
+# Check if the DSN environment variable was loaded successfully by config.py
+if SentryConfig.SENTRY_DSN:
+    try:
+        sentry_sdk.init(
+            # Read the DSN from your configuration
+            dsn=SentryConfig.SENTRY_DSN,
+
+            # Add Flask integration to automatically capture Flask errors
+            integrations=[
+                FlaskIntegration(),
+            ],
+
+            # Set traces_sample_rate to 1.0 to capture 100%
+            # of transactions for performance monitoring.
+            # Lower this value (e.g., 0.1 for 10%) in production
+            # if performance monitoring adds too much overhead.
+            traces_sample_rate=1.0,
+
+            # Set the environment based on your DEBUG flag or another env var
+            # This helps filter issues in Sentry (e.g., production vs development)
+            environment="development" if APIConfig.DEBUG else "production",
+
+            # Optional: Set a release version (e.g., from an env var or git commit)
+            # release="cleanplate@1.0.1"
+        )
+        # Log success if initialization works
+        logging.info("Sentry initialized successfully.")
+    except Exception as e:
+         # Log error if initialization fails
+         logging.error(f"Failed to initialize Sentry: {e}")
+else:
+    # Log warning if the DSN wasn't found in the environment variables
+    logging.warning("SENTRY_DSN environment variable not found, Sentry not initialized.")
+# --- End Sentry Initialization Block ---
 
 # Setup logging
 logging.basicConfig(
