@@ -27,3 +27,17 @@ class APIConfig:
     NYC_API_URL = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
     NYC_API_APP_TOKEN = os.environ.get("NYC_API_APP_TOKEN", "")
     API_REQUEST_LIMIT = int(os.environ.get("API_REQUEST_LIMIT", "50000"))
+    
+class RedisConfig:
+    # Load Redis connection details from environment variables provided by Railway
+    # Use the exact names shown in your Railway 'Variables' tab for the Redis service
+    HOST = os.environ.get("REDISHOST", "localhost")
+    PORT = int(os.environ.get("REDISPORT", 6379)) # Convert port to integer
+    PASSWORD = os.environ.get("REDISPASSWORD", None)
+    USER = os.environ.get("REDISUSER", "default") # Use 'default' if REDISUSER isn't set or needed
+
+    # Construct a basic connection URL (optional, depends on library usage)
+    # Note: Ensure password handling is secure if constructing URLs
+    # URL = os.environ.get("REDIS_URL", None) # Alternatively, use the full URL if preferred by library
+
+
