@@ -73,7 +73,21 @@ def sanitize_input(input_str):
     
     # Return both versions for use in search
     return sanitized_input, no_periods_sanitized
-
+    
+# Add this temporary route for Sentry testing
+@app.route('/sentry-test')
+def sentry_test_route():
+    try:
+        # This line will intentionally cause a ZeroDivisionError
+        result = 1 / 0
+    except Exception as e:
+        # Even though we catch it here, Sentry's FlaskIntegration
+        # should have already captured the error before this point.
+        # We still raise it to ensure a 500 error response.
+         logger.error("Intentional Sentry test error occurred.", exc_info=True)
+         raise e
+    return "This should not be reached." # Should return 500 error
+    
 @app.route('/search', methods=['GET'])
 def search():
     name = request.args.get('name', '').strip()
