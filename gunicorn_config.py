@@ -50,4 +50,3 @@ def post_fork(server, worker):
 #     #     DatabaseManager.close_all_connections() # Assuming such a method exists
 #     # except Exception as e:
 #     #     server.log.error(f"Worker {worker.pid}: Error closing DB connections on exit: {e}")
-
