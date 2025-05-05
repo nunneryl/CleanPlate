@@ -26,6 +26,7 @@ class APIConfig:
     PORT = int(os.environ.get("PORT", "5000"))
     NYC_API_URL = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
     NYC_API_APP_TOKEN = os.environ.get("NYC_API_APP_TOKEN", "")
+    UPDATE_SECRET_KEY = os.environ.get("UPDATE_SECRET_KEY", None)
     API_REQUEST_LIMIT = int(os.environ.get("API_REQUEST_LIMIT", "50000"))
     
 class RedisConfig:
