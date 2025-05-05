@@ -6,7 +6,7 @@ load_dotenv() # For local .env file
 
 class SentryConfig:
     SENTRY_DSN = os.environ.get("SENTRY_DSN", None)
-
+    
 # Database configuration - Use Railway's default PG* names
 class DatabaseConfig:
     # Read Railway's standard Postgres variables
