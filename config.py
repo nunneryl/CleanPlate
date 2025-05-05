@@ -1,42 +1,42 @@
-# In config.py
+# config.py - Use Railway standard variable names
 import os
 from dotenv import load_dotenv
-load_dotenv()
+
+load_dotenv() # For local .env file
 
 class SentryConfig:
-    SENTRY_DSN = os.environ.get("SENTRY_DSN", None) # Returns None if not set
+    SENTRY_DSN = os.environ.get("SENTRY_DSN", None)
 
-# Database configuration
+# Database configuration - Use Railway's default PG* names
 class DatabaseConfig:
-    DB_NAME = os.environ.get("DB_NAME", "nyc_restaurant_db")
-    DB_USER = os.environ.get("DB_USER", "postgres")
-    DB_PASSWORD = os.environ.get("DB_PASSWORD", "")  # No default password
-    DB_HOST = os.environ.get("DB_HOST", "localhost")
-    DB_PORT = os.environ.get("DB_PORT", "5432")
-    
+    # Read Railway's standard Postgres variables
+    DB_NAME = os.environ.get("PGDATABASE", "nyc_restaurant_db") # Use PGDATABASE
+    DB_USER = os.environ.get("PGUSER", "postgres")             # Use PGUSER
+    DB_PASSWORD = os.environ.get("PGPASSWORD", None)           # Use PGPASSWORD
+    DB_HOST = os.environ.get("PGHOST", "localhost")            # Use PGHOST
+    DB_PORT = os.environ.get("PGPORT", "5432")                 # Use PGPORT
+
     @classmethod
     def get_connection_string(cls):
-        """Return a database connection string"""
-        return f"postgresql://{cls.DB_USER}:{cls.DB_PASSWORD}@{cls.DB_HOST}:{cls.DB_PORT}/{cls.DB_NAME}"
+        """Return a database connection string using PG* vars"""
+        password_part = f":{cls.DB_PASSWORD}" if cls.DB_PASSWORD else ""
+        # Construct using the variables read above
+        return f"postgresql://{cls.DB_USER}{password_part}@{cls.DB_HOST}:{cls.DB_PORT}/{cls.DB_NAME}"
 
-# API configuration
+# API and App configuration
 class APIConfig:
     DEBUG = os.environ.get("DEBUG", "False").lower() == "true"
-    HOST = os.environ.get("HOST", "0.0.0.0")
-    PORT = int(os.environ.get("PORT", "5000"))
-    NYC_API_URL = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
-    NYC_API_APP_TOKEN = os.environ.get("NYC_API_APP_TOKEN", "")
-    UPDATE_SECRET_KEY = os.environ.get("UPDATE_SECRET_KEY", None)
-    API_REQUEST_LIMIT = int(os.environ.get("API_REQUEST_LIMIT", "50000"))
-    
-class RedisConfig:
-    # Load Redis connection details from environment variables provided by Railway
-    # Use the exact names shown in your Railway 'Variables' tab for the Redis service
-    HOST = os.environ.get("REDISHOST", "localhost")
-    PORT = int(os.environ.get("REDISPORT", 6379)) # Convert port to integer
-    PASSWORD = os.environ.get("REDISPASSWORD", None)
-    USER = os.environ.get("REDISUSER", "default") # Use 'default' if REDISUSER isn't set or needed
+    HOST = os.environ.get("HOST", "0.0.0.0") # Usually not needed, Gunicorn binds
+    PORT = int(os.environ.get("PORT", "5000")) # Railway provides PORT
 
-    # Construct a basic connection URL (optional, depends on library usage)
-    # Note: Ensure password handling is secure if constructing URLs
-    # URL = os.environ.get("REDIS_URL", None) # Alternatively, use the full URL if preferred by library
+    NYC_API_URL = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
+    NYC_API_APP_TOKEN = os.environ.get("NYC_API_APP_TOKEN", None)
+    API_REQUEST_LIMIT = int(os.environ.get("API_REQUEST_LIMIT", "50000"))
+    UPDATE_SECRET_KEY = os.environ.get("UPDATE_SECRET_KEY", None)
+
+# Redis configuration - Use Railway's default REDIS* names
+class RedisConfig:
+    HOST = os.environ.get("REDISHOST", "localhost")
+    PORT = int(os.environ.get("REDISPORT", 6379))
+    PASSWORD = os.environ.get("REDISPASSWORD", None)
+    USER = os.environ.get("REDISUSER", "default") # Often 'default'
