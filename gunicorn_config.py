@@ -1,11 +1,16 @@
 # gunicorn_config.py
 import logging
 
-    # Optional: Configure Gunicorn's own logging if needed
-    # You can customize log format, level, and output here
-    # errorlog = '-' # Log errors to stderr
-    # accesslog = '-' # Log access logs to stdout
-    # loglevel = 'info' # Set log level (debug, info, warning, error, critical)
+# Explicitly configure Gunicorn's logging
+# Send error logs to stderr
+errorlog = '-'
+# Send access logs to stdout
+accesslog = '-'
+# Set the log level (info is usually good for production)
+loglevel = 'info'
+
+# --- Keep your existing post_fork hook below ---
+def post_fork(server, worker):
 
     # Server hook called just after a worker process has been successfully forked.
     # This is a reliable place to initialize resources needed by each worker.
