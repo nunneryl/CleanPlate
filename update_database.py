@@ -3,6 +3,8 @@ import requests
 import logging
 import argparse
 import traceback # Import traceback for detailed error logging
+import psycopg2 # Make sure psycopg2 is imported
+import psycopg2.extras # Import extras for batch execution
 from datetime import datetime, timedelta
 from dateutil.parser import parse as date_parse
 from db_manager import DatabaseConnection # Assuming DatabaseConnection handles pool init/get/return
@@ -35,31 +37,50 @@ def convert_date(date_str):
     if not date_str:
         return None
     try:
+        # Attempt parsing common formats first for speed
+        # Adjust formats based on actual API output if known
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(date_str, fmt)
+                return dt.date()
+            except ValueError:
+                continue
+        # Fallback to dateutil parser if specific formats fail
         dt = date_parse(date_str)
         return dt.date()
     except Exception as e:
-        logger.error(f"Error parsing date {date_str}: {e}")
+        logger.warning(f"Could not parse date '{date_str}': {e}") # Changed to warning
         return None
 
-def fetch_data(days_back=30, max_retries=3):
+def fetch_data(days_back=2, max_retries=3): # Default changed to 2 days
     """Fetch data from NYC API with pagination"""
-    print_debug(f"Entering fetch_data for past {days_back} days...") # DEBUG PRINT
+    print_debug(f"Entering fetch_data for past {days_back} days...")
     logger.info(f"Fetching data from the NYC API for the past {days_back} days...")
 
     results = []
-    limit = APIConfig.API_REQUEST_LIMIT
+    limit = APIConfig.API_REQUEST_LIMIT # Keep the original limit for fetching
     offset = 0
     total_fetched = 0
 
     # Calculate date range
     end_date = datetime.now().date()
     start_date = end_date - timedelta(days=days_back)
-    date_filter = f"inspection_date between '{start_date}' and '{end_date}'"
-    print_debug(f"Date filter: {date_filter}") # DEBUG PRINT
+    # Format dates for SODA $where clause (YYYY-MM-DD)
+    start_date_str = start_date.strftime('%Y-%m-%d')
+    end_date_str = end_date.strftime('%Y-%m-%d')
+    # Ensure inspection_date is treated as text and compared correctly
+    date_filter = f"inspection_date between '{start_date_str}T00:00:00.000' and '{end_date_str}T23:59:59.999'"
+    print_debug(f"Date filter: {date_filter}")
 
     while True:
-        url = f"{APIConfig.NYC_API_URL}?$limit={limit}&$offset={offset}&$where={date_filter}"
-        print_debug(f"Fetching URL: {url}") # DEBUG PRINT
+        # Construct URL safely
+        base_url = APIConfig.NYC_API_URL
+        params = {
+            "$limit": limit,
+            "$offset": offset,
+            "$where": date_filter
+        }
+        print_debug(f"Fetching URL: {base_url} with params: {params}")
 
         headers = {}
         if APIConfig.NYC_API_APP_TOKEN:
@@ -67,32 +88,27 @@ def fetch_data(days_back=30, max_retries=3):
 
         data = None # Initialize data for the loop check
         for attempt in range(max_retries):
-            print_debug(f"API fetch attempt {attempt + 1}/{max_retries}...") # DEBUG PRINT
+            print_debug(f"API fetch attempt {attempt + 1}/{max_retries}...")
             try:
-                response = requests.get(url, headers=headers, timeout=60) # Increased timeout slightly
+                response = requests.get(base_url, headers=headers, params=params, timeout=60)
 
-                print_debug(f"API response status code: {response.status_code}") # DEBUG PRINT
-                if response.status_code != 200:
-                    logger.error(f"API request failed with status {response.status_code}: {response.text}")
-                    if attempt < max_retries - 1:
-                        logger.info(f"Retrying attempt {attempt + 2}/{max_retries}...")
-                        continue
-                    break # Exit retry loop if status != 200 after retries
+                print_debug(f"API response status code: {response.status_code}")
+                response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
 
                 data = response.json()
 
                 if not data:
-                    print_debug("API returned no data for this offset.") # DEBUG PRINT
+                    print_debug("API returned no data for this offset.")
                     logger.info("No more data to fetch for this offset.")
                     break # Exit retry loop, outer loop will check 'not data'
 
-                print_debug(f"API fetch successful, got {len(data)} records.") # DEBUG PRINT
+                print_debug(f"API fetch successful, got {len(data)} records.")
                 results.extend(data)
                 total_fetched += len(data)
                 logger.info(f"Fetched {len(data)} records, total: {total_fetched}")
 
                 if len(data) < limit:
-                    print_debug("Fetched less than limit, assuming end of data.") # DEBUG PRINT
+                    print_debug("Fetched less than limit, assuming end of data.")
                     break # Exit retry loop, outer loop will check 'not data'
 
                 # Success, exit retry loop
@@ -100,7 +116,7 @@ def fetch_data(days_back=30, max_retries=3):
 
             except requests.exceptions.Timeout:
                  logger.error(f"Network timeout on attempt {attempt + 1}/{max_retries}")
-                 print_debug(f"Network timeout on attempt {attempt + 1}/{max_retries}") # DEBUG PRINT
+                 print_debug(f"Network timeout on attempt {attempt + 1}/{max_retries}")
                  if attempt < max_retries - 1:
                      logger.info(f"Retrying in 5 seconds...")
                      import time
@@ -108,9 +124,14 @@ def fetch_data(days_back=30, max_retries=3):
                  else:
                      logger.error("Max retries reached after timeout, giving up on this batch")
                      break # Exit retry loop
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Network error on attempt {attempt + 1}/{max_retries}: {e}")
-                print_debug(f"Network error on attempt {attempt + 1}/{max_retries}: {e}") # DEBUG PRINT
+            except requests.exceptions.HTTPError as http_err:
+                logger.error(f"HTTP error on attempt {attempt + 1}/{max_retries}: {http_err}")
+                print_debug(f"HTTP error on attempt {attempt + 1}/{max_retries}: {http_err}")
+                # Don't retry on 4xx errors usually, maybe retry on 5xx? For now, break.
+                break # Exit retry loop on HTTP errors
+            except requests.exceptions.RequestException as req_err:
+                logger.error(f"Network error on attempt {attempt + 1}/{max_retries}: {req_err}")
+                print_debug(f"Network error on attempt {attempt + 1}/{max_retries}: {req_err}")
                 if attempt < max_retries - 1:
                     logger.info(f"Retrying in 5 seconds...")
                     import time
@@ -120,9 +141,8 @@ def fetch_data(days_back=30, max_retries=3):
                     break # Exit retry loop
             except Exception as e:
                 logger.error(f"Unexpected error during fetch attempt {attempt + 1}/{max_retries}: {e}")
-                print_debug(f"Unexpected error during fetch attempt {attempt + 1}/{max_retries}: {e}") # DEBUG PRINT
-                # Optionally log traceback
-                # logger.error(traceback.format_exc())
+                print_debug(f"Unexpected error during fetch attempt {attempt + 1}/{max_retries}: {e}")
+                logger.error(traceback.format_exc()) # Log traceback for unexpected errors
                 if attempt < max_retries - 1:
                     logger.info(f"Retrying in 5 seconds...")
                     import time
@@ -131,20 +151,20 @@ def fetch_data(days_back=30, max_retries=3):
                     logger.error("Max retries reached after unexpected error, giving up on this batch")
                     break # Exit retry loop
 
-        # Break the outer loop if the last attempt failed to get data
-        if data is None or not data: # Check if data is None (error) or empty (end of results)
-            print_debug("Breaking outer fetch loop.") # DEBUG PRINT
+        # Break the outer loop if the last attempt failed to get data or API returned empty
+        if data is None or not data:
+            print_debug("Breaking outer fetch loop.")
             break
 
         # Successful fetch, increment offset for pagination
         offset += limit
 
     logger.info(f"Total records fetched: {total_fetched}")
-    print_debug(f"Exiting fetch_data. Total fetched: {total_fetched}") # DEBUG PRINT
+    print_debug(f"Exiting fetch_data. Total fetched: {total_fetched}")
     return results
 
-# --- Keep fetch_all_data and fetch_restaurant_by_camis as they were ---
-# (Or add similar print_debug statements if needed later)
+# --- fetch_all_data and fetch_restaurant_by_camis remain unchanged ---
+# (Add print_debug/logging if needed for those modes)
 def fetch_all_data(max_retries=3):
     """Fetch all data from NYC API without date filtering"""
     print_debug("Entering fetch_all_data...") # DEBUG PRINT
@@ -156,8 +176,13 @@ def fetch_all_data(max_retries=3):
     total_fetched = 0
 
     while True:
-        url = f"{APIConfig.NYC_API_URL}?$limit={limit}&$offset={offset}"
-        print_debug(f"Fetching URL: {url}") # DEBUG PRINT
+        # Construct URL safely
+        base_url = APIConfig.NYC_API_URL
+        params = {
+            "$limit": limit,
+            "$offset": offset
+        }
+        print_debug(f"Fetching URL: {base_url} with params: {params}") # DEBUG PRINT
 
         headers = {}
         if APIConfig.NYC_API_APP_TOKEN:
@@ -168,15 +193,10 @@ def fetch_all_data(max_retries=3):
             print_debug(f"API fetch attempt {attempt + 1}/{max_retries}...") # DEBUG PRINT
             try:
                 # Increase timeout for potentially larger full sync requests
-                response = requests.get(url, headers=headers, timeout=120)
+                response = requests.get(base_url, headers=headers, params=params, timeout=120)
 
                 print_debug(f"API response status code: {response.status_code}") # DEBUG PRINT
-                if response.status_code != 200:
-                    logger.error(f"API request failed with status {response.status_code}: {response.text}")
-                    if attempt < max_retries - 1:
-                        logger.info(f"Retrying attempt {attempt + 2}/{max_retries}...")
-                        continue
-                    break
+                response.raise_for_status()
 
                 data = response.json()
 
@@ -207,6 +227,10 @@ def fetch_all_data(max_retries=3):
                  else:
                      logger.error("Max retries reached after timeout, giving up on this batch")
                      break # Exit retry loop
+            except requests.exceptions.HTTPError as http_err:
+                logger.error(f"HTTP error on attempt {attempt + 1}/{max_retries}: {http_err}")
+                print_debug(f"HTTP error on attempt {attempt + 1}/{max_retries}: {http_err}")
+                break # Exit retry loop on HTTP errors
             except requests.exceptions.RequestException as e:
                 logger.error(f"Network error on attempt {attempt + 1}/{max_retries}: {e}")
                 print_debug(f"Network error on attempt {attempt + 1}/{max_retries}: {e}") # DEBUG PRINT
@@ -220,6 +244,7 @@ def fetch_all_data(max_retries=3):
             except Exception as e:
                 logger.error(f"Unexpected error during fetch attempt {attempt + 1}/{max_retries}: {e}")
                 print_debug(f"Unexpected error during fetch attempt {attempt + 1}/{max_retries}: {e}") # DEBUG PRINT
+                logger.error(traceback.format_exc()) # Log traceback for unexpected errors
                 if attempt < max_retries - 1:
                     logger.info(f"Retrying in 10 seconds...")
                     import time
@@ -247,8 +272,12 @@ def fetch_restaurant_by_camis(camis, max_retries=3):
     results = []
     limit = 1000  # Should be enough for a single restaurant
 
-    url = f"{APIConfig.NYC_API_URL}?$limit={limit}&$where=camis='{camis}'"
-    print_debug(f"Fetching URL: {url}") # DEBUG PRINT
+    base_url = APIConfig.NYC_API_URL
+    params = {
+        "$limit": limit,
+        "$where": f"camis='{camis}'" # Ensure CAMIS is quoted if it's a string type in API
+    }
+    print_debug(f"Fetching URL: {base_url} with params: {params}") # DEBUG PRINT
 
     headers = {}
     if APIConfig.NYC_API_APP_TOKEN:
@@ -257,24 +286,34 @@ def fetch_restaurant_by_camis(camis, max_retries=3):
     for attempt in range(max_retries):
         print_debug(f"API fetch attempt {attempt + 1}/{max_retries}...") # DEBUG PRINT
         try:
-            response = requests.get(url, headers=headers, timeout=30)
+            response = requests.get(base_url, headers=headers, params=params, timeout=30)
 
             print_debug(f"API response status code: {response.status_code}") # DEBUG PRINT
-            if response.status_code != 200:
-                logger.error(f"API request failed with status {response.status_code}: {response.text}")
-                if attempt < max_retries - 1:
-                    logger.info(f"Retrying attempt {attempt + 2}/{max_retries}...")
-                    continue
-                return [] # Return empty list on failure after retries
+            response.raise_for_status()
 
             data = response.json()
             logger.info(f"Fetched {len(data)} inspections for restaurant CAMIS: {camis}")
             print_debug(f"Exiting fetch_restaurant_by_camis successfully.") # DEBUG PRINT
             return data
 
+        except requests.exceptions.HTTPError as http_err:
+            logger.error(f"HTTP error fetching CAMIS {camis} on attempt {attempt + 1}/{max_retries}: {http_err}")
+            print_debug(f"HTTP error fetching CAMIS {camis} on attempt {attempt + 1}/{max_retries}: {http_err}") # DEBUG PRINT
+            # Don't retry on 404 maybe?
+            if response.status_code == 404:
+                 logger.warning(f"CAMIS {camis} not found (404).")
+                 return []
+            if attempt < max_retries - 1:
+                logger.info(f"Retrying attempt {attempt + 2}/{max_retries}...")
+                import time
+                time.sleep(5) # Shorter wait for single CAMIS
+            else:
+                 logger.error(f"Max retries reached for CAMIS {camis} after HTTP error.")
+                 return [] # Return empty list on failure after retries
         except Exception as e:
             logger.error(f"Error fetching restaurant {camis} on attempt {attempt + 1}/{max_retries}: {e}")
             print_debug(f"Error fetching restaurant {camis} on attempt {attempt + 1}/{max_retries}: {e}") # DEBUG PRINT
+            logger.error(traceback.format_exc())
             if attempt < max_retries - 1:
                 logger.info(f"Retrying in 5 seconds...")
                 import time
@@ -288,168 +327,225 @@ def fetch_restaurant_by_camis(camis, max_retries=3):
     return [] # Should not be reached if logic is correct
 
 
-def update_database(data):
-    """Update database with fetched data"""
-    print_debug("Entering update_database function...") # DEBUG PRINT
-    logger.info(f"Updating database with {len(data)} fetched records...")
+def update_database_batch(data):
+    """Update database with fetched data using batch operations"""
+    print_debug("Entering update_database_batch function...")
+    if not data:
+        logger.info("No data provided to update_database_batch.")
+        print_debug("No data to process, exiting update_database_batch.")
+        return 0, 0
 
-    restaurants_updated = 0
-    violations_updated = 0
-    errors = 0
-    conn = None # Initialize conn outside try
+    logger.info(f"Preparing batch update for {len(data)} fetched records...")
 
+    restaurants_to_upsert = []
+    violations_to_insert = []
+    processed_restaurant_keys = set() # Track (camis, inspection_date) to avoid duplicates in restaurant batch
+
+    print_debug("Processing fetched data into lists for batch execution...")
+    for i, item in enumerate(data):
+        # Print progress occasionally
+        if (i + 1) % 1000 == 0:
+             print_debug(f"Preparing record {i + 1}/{len(data)} for batch...")
+
+        try:
+            # --- Prepare Data (similar to before, ensure types are correct) ---
+            camis = item.get("camis")
+            inspection_date = convert_date(item.get("inspection_date"))
+            grade_date = convert_date(item.get("grade_date"))
+            latitude_val = item.get("latitude")
+            longitude_val = item.get("longitude")
+
+            # --- Prepare Restaurant Tuple ---
+            # Use a unique key for the restaurant upsert based on primary/unique constraints
+            # Assuming (camis, inspection_date) is the unique key for an inspection record
+            restaurant_key = (camis, inspection_date)
+            if camis and inspection_date and restaurant_key not in processed_restaurant_keys:
+                restaurant_tuple = (
+                    camis,
+                    item.get("dba"),
+                    item.get("boro"),
+                    item.get("building"),
+                    item.get("street"),
+                    item.get("zipcode"),
+                    item.get("phone"),
+                    float(latitude_val) if latitude_val and latitude_val != 'N/A' else None, # Handle potential 'N/A' strings if API returns them
+                    float(longitude_val) if longitude_val and longitude_val != 'N/A' else None,
+                    item.get("grade"),
+                    inspection_date, # Use converted date object
+                    item.get("critical_flag"),
+                    item.get("inspection_type"),
+                    item.get("cuisine_description"),
+                    grade_date # Use converted date object
+                )
+                restaurants_to_upsert.append(restaurant_tuple)
+                processed_restaurant_keys.add(restaurant_key)
+
+            # --- Prepare Violation Tuple (if violation exists) ---
+            violation_code = item.get("violation_code")
+            if camis and inspection_date and violation_code:
+                 violation_tuple = (
+                    camis,
+                    inspection_date, # Use converted date object
+                    violation_code,
+                    item.get("violation_description")
+                 )
+                 violations_to_insert.append(violation_tuple)
+
+        except Exception as e:
+            # Log error for the specific item but continue processing others for batch
+            logger.error(f"Error preparing record CAMIS={item.get('camis')}, InspDate={item.get('inspection_date')} for batch: {e}")
+            print_debug(f"ERROR preparing record CAMIS={item.get('camis')} for batch: {e}")
+            # Consider adding this problematic item to an error list for later review
+            continue
+
+    print_debug(f"Prepared {len(restaurants_to_upsert)} unique restaurant records for upsert.")
+    print_debug(f"Prepared {len(violations_to_insert)} violation records for insert.")
+
+    # --- Perform Batch Database Operations ---
+    conn = None
+    success = False
     try:
-        print_debug("Attempting to get DB connection...") # DEBUG PRINT
-        # Use the context manager for connection handling
+        print_debug("Attempting to get DB connection for batch operations...")
         with DatabaseConnection() as conn:
-            print_debug("DB connection acquired successfully.") # DEBUG PRINT
+            print_debug("DB connection acquired successfully.")
             with conn.cursor() as cursor:
-                print_debug("DB cursor acquired.") # DEBUG PRINT
-                print_debug(f"Starting loop through {len(data)} items...") # DEBUG PRINT
-                for i, item in enumerate(data):
-                    # Print progress every 1000 records
-                    if (i + 1) % 1000 == 0:
-                         print_debug(f"Processing record {i + 1}/{len(data)} (CAMIS: {item.get('camis')})...")
+                print_debug("DB cursor acquired.")
 
-                    try:
-                        # --- Prepare Data ---
-                        # (Ensure all necessary fields are extracted and converted)
-                        camis = item.get("camis")
-                        inspection_date = convert_date(item.get("inspection_date"))
-                        latitude_val = item.get("latitude")
-                        longitude_val = item.get("longitude")
+                # --- Batch Upsert Restaurants ---
+                if restaurants_to_upsert:
+                    print_debug(f"Executing batch upsert for {len(restaurants_to_upsert)} restaurants...")
+                    upsert_sql = """
+                        INSERT INTO restaurants (
+                            camis, dba, boro, building, street, zipcode, phone,
+                            latitude, longitude, grade, inspection_date, critical_flag,
+                            inspection_type, cuisine_description, grade_date
+                        )
+                        VALUES %s
+                        ON CONFLICT (camis, inspection_date) DO UPDATE SET
+                            dba = EXCLUDED.dba,
+                            boro = EXCLUDED.boro,
+                            building = EXCLUDED.building,
+                            street = EXCLUDED.street,
+                            zipcode = EXCLUDED.zipcode,
+                            phone = EXCLUDED.phone,
+                            latitude = EXCLUDED.latitude,
+                            longitude = EXCLUDED.longitude,
+                            grade = EXCLUDED.grade,
+                            critical_flag = EXCLUDED.critical_flag,
+                            inspection_type = EXCLUDED.inspection_type,
+                            cuisine_description = EXCLUDED.cuisine_description,
+                            grade_date = EXCLUDED.grade_date;
+                    """
+                    # Use execute_values for efficient upserting if psycopg2 version supports it well,
+                    # otherwise execute_batch might be simpler for basic upsert.
+                    # execute_batch is generally for INSERTs, let's use execute_values for UPSERT.
+                    # Note: execute_values might need psycopg2 >= 2.7
+                    psycopg2.extras.execute_values(
+                        cursor,
+                        upsert_sql,
+                        restaurants_to_upsert,
+                        template="""(
+                            %(camis)s, %(dba)s, %(boro)s, %(building)s, %(street)s, %(zipcode)s, %(phone)s,
+                            %(latitude)s, %(longitude)s, %(grade)s, %(inspection_date)s, %(critical_flag)s,
+                            %(inspection_type)s, %(cuisine_description)s, %(grade_date)s
+                        )""", # Template requires named arguments if using dicts, adapt if using tuples
+                         page_size=100 # Adjust page size as needed
+                    )
+                    # Re-check execute_values syntax if needed, might need adaptation based on tuple structure
+                    # Alternative if execute_values has issues: loop execute() with ON CONFLICT (less efficient)
+                    print_debug(f"Batch restaurant upsert executed.")
 
-                        # --- Update restaurants table ---
-                        # print_debug(f"Executing restaurant upsert for CAMIS {camis}, Date {inspection_date}") # Too verbose
-                        cursor.execute("""
-                            INSERT INTO restaurants (
-                                camis, dba, boro, building, street, zipcode, phone,
-                                latitude, longitude, grade, inspection_date, critical_flag,
-                                inspection_type, cuisine_description, grade_date
-                            )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (camis, inspection_date) DO UPDATE SET
-                                dba = EXCLUDED.dba,
-                                boro = EXCLUDED.boro,
-                                building = EXCLUDED.building,
-                                street = EXCLUDED.street,
-                                zipcode = EXCLUDED.zipcode,
-                                phone = EXCLUDED.phone,
-                                latitude = EXCLUDED.latitude,
-                                longitude = EXCLUDED.longitude,
-                                grade = EXCLUDED.grade,
-                                critical_flag = EXCLUDED.critical_flag,
-                                inspection_type = EXCLUDED.inspection_type,
-                                cuisine_description = EXCLUDED.cuisine_description,
-                                grade_date = EXCLUDED.grade_date
-                        """, (
-                            camis,
-                            item.get("dba"),
-                            item.get("boro"),
-                            item.get("building"),
-                            item.get("street"),
-                            item.get("zipcode"),
-                            item.get("phone"),
-                            float(latitude_val) if latitude_val else None,
-                            float(longitude_val) if longitude_val else None,
-                            item.get("grade"),
-                            inspection_date, # Use converted date
-                            item.get("critical_flag"),
-                            item.get("inspection_type"),
-                            item.get("cuisine_description"),
-                            convert_date(item.get("grade_date"))
-                        ))
-                        # Don't count updates here, psycopg2 doesn't easily return upsert counts
+                # --- Batch Insert Violations ---
+                if violations_to_insert:
+                    print_debug(f"Executing batch insert for {len(violations_to_insert)} violations...")
+                    insert_sql = """
+                        INSERT INTO violations (
+                            camis, inspection_date, violation_code, violation_description
+                        ) VALUES %s
+                        ON CONFLICT DO NOTHING;
+                    """
+                    psycopg2.extras.execute_values(
+                        cursor,
+                        insert_sql,
+                        violations_to_insert,
+                        template="(%s, %s, %s, %s)", # Template for tuples
+                        page_size=100 # Adjust page size
+                    )
+                    print_debug(f"Batch violation insert executed.")
 
-                        # --- If there's a violation, update violations table ---
-                        violation_code = item.get("violation_code")
-                        if violation_code:
-                            # print_debug(f"Executing violation insert for CAMIS {camis}, Date {inspection_date}, Code {violation_code}") # Too verbose
-                            cursor.execute("""
-                                INSERT INTO violations (
-                                    camis, inspection_date, violation_code, violation_description
-                                ) VALUES (%s, %s, %s, %s)
-                                ON CONFLICT DO NOTHING
-                            """, (
-                                camis,
-                                inspection_date, # Use converted date
-                                violation_code,
-                                item.get("violation_description")
-                            ))
-                            # Don't count updates here
-
-                    except Exception as e:
-                        logger.error(f"Error processing record CAMIS={item.get('camis')}, InspDate={item.get('inspection_date')}: {e}")
-                        print_debug(f"ERROR processing record CAMIS={item.get('camis')}: {e}") # DEBUG PRINT
-                        errors += 1
-                        # Rollback the transaction for this specific item's failure?
-                        # Or just log and continue? Current logic continues.
-                        # Consider adding conn.rollback() here if one bad record should stop the batch.
-                        # For now, we log and continue, attempting commit later.
-                        continue # Skip to the next item
-
-                # --- Commit after loop ---
-                print_debug(f"Finished loop. Processed {i+1} items. Attempting to commit transaction...") # DEBUG PRINT
+                # --- Commit Transaction ---
+                print_debug("Attempting to commit batch transaction...")
                 conn.commit()
-                print_debug("Transaction committed successfully.") # DEBUG PRINT
-                # Note: We don't have accurate update counts with ON CONFLICT without more complex queries
-                restaurants_updated = -1 # Indicate unknown update count
-                violations_updated = -1 # Indicate unknown update count
+                print_debug("Batch transaction committed successfully.")
+                success = True
 
-        # Log results after commit
-        logger.info(f"Database update attempt finished. Errors: {errors}. (Update counts not tracked precisely with ON CONFLICT)")
-        print_debug(f"Database update attempt finished. Errors: {errors}. (Update counts N/A)") # DEBUG PRINT
-        return restaurants_updated, violations_updated
-
-    except psycopg2.OperationalError as db_op_err:
-        # Specific handling for connection errors during the 'with' block itself
-        logger.error(f"Database Operational Error during update: {db_op_err}")
-        print_debug(f"FATAL: Database Operational Error during update: {db_op_err}") # DEBUG PRINT
-        logger.error(traceback.format_exc()) # Log full traceback for DB errors
-        # No need to rollback here, context manager handles it on error
-        return 0, 0 # Indicate failure
+    except psycopg2.Error as db_err: # Catch specific psycopg2 errors
+        logger.error(f"Database Error during batch update: {db_err}")
+        print_debug(f"FATAL: Database Error during batch update: {db_err}")
+        logger.error(traceback.format_exc())
+        if conn:
+            conn.rollback() # Rollback on database errors
+            print_debug("Database transaction rolled back due to error.")
     except Exception as e:
-        logger.error(f"Unexpected error during database update: {e}")
-        print_debug(f"FATAL: Unexpected error during database update: {e}") # DEBUG PRINT
-        logger.error(traceback.format_exc()) # Log full traceback
-        # Context manager handles rollback
-        return 0, 0 # Indicate failure
+        logger.error(f"Unexpected error during batch database update: {e}")
+        print_debug(f"FATAL: Unexpected error during batch database update: {e}")
+        logger.error(traceback.format_exc())
+        if conn:
+            conn.rollback() # Rollback on other errors
+            print_debug("Database transaction rolled back due to error.")
     finally:
-        # This block executes whether the try block succeeded or failed
-        print_debug("Exiting update_database function (finally block).") # DEBUG PRINT
-        # Connection is returned automatically by the context manager's __exit__
+        print_debug("Exiting update_database_batch function (finally block).")
+        # Connection is returned automatically by the context manager
+
+    if success:
+        logger.info(f"Batch database update finished successfully. Processed approx {len(restaurants_to_upsert)} restaurants and {len(violations_to_insert)} violations.")
+        print_debug(f"Batch database update finished successfully.")
+        # Return counts (or -1 if precise counts aren't easily available/needed)
+        return len(restaurants_to_upsert), len(violations_to_insert)
+    else:
+        logger.error("Batch database update failed.")
+        print_debug("Batch database update failed.")
+        return 0, 0
 
 
 def update_specific_restaurants(camis_list):
-    """Update specific restaurants by CAMIS ID"""
-    print_debug(f"Entering update_specific_restaurants for {len(camis_list)} CAMIS IDs.") # DEBUG PRINT
+    """Update specific restaurants by CAMIS ID (using batch update internally)"""
+    print_debug(f"Entering update_specific_restaurants for {len(camis_list)} CAMIS IDs.")
     logger.info(f"Updating {len(camis_list)} specific restaurants...")
 
-    total_restaurants = 0
-    total_violations = 0
+    all_inspection_data = []
+    fetch_errors = 0
 
     for i, camis in enumerate(camis_list):
-        print_debug(f"Processing CAMIS {i+1}/{len(camis_list)}: {camis}") # DEBUG PRINT
+        print_debug(f"Processing CAMIS {i+1}/{len(camis_list)}: {camis}")
         data = fetch_restaurant_by_camis(camis)
         if data:
-            # update_database returns -1 for counts now, so we can't sum them
-            update_database(data)
-            # Maybe just count successful updates?
-            # total_restaurants += 1 # Count CAMIS IDs processed
+            all_inspection_data.extend(data)
         else:
+            fetch_errors += 1
             print_debug(f"No data fetched for CAMIS {camis}")
 
-    logger.info(f"Specific restaurant update complete. Processed {len(camis_list)} CAMIS IDs.")
-    print_debug(f"Exiting update_specific_restaurants.") # DEBUG PRINT
-    # Return value may need adjustment as counts are not tracked
-    return -1, -1
+    logger.info(f"Finished fetching data for specific restaurants. Total records: {len(all_inspection_data)}. Fetch errors: {fetch_errors}")
+
+    # Update database with all collected data in one batch
+    if all_inspection_data:
+        update_database_batch(all_inspection_data)
+    else:
+        logger.warning("No data collected to update for specific restaurants.")
+
+    logger.info(f"Specific restaurant update process complete. Processed {len(camis_list)} CAMIS IDs.")
+    print_debug(f"Exiting update_specific_restaurants.")
+    # Return value indicates success/failure maybe, not counts
+    return -1, -1 # Keep simple return for now
+
 
 def main():
-    print_debug("--- main() started ---") # DEBUG PRINT
+    print_debug("--- main() started ---")
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Update restaurant inspection database")
     parser.add_argument("--full-sync", action="store_true", help="Perform full data sync")
-    parser.add_argument("--days", type=int, default=30, help="Number of days to look back")
+    # --- CHANGED DEFAULT DAYS TO 2 ---
+    parser.add_argument("--days", type=int, default=2, help="Number of days to look back")
     parser.add_argument("--restaurant", type=str, help="Update specific restaurant by CAMIS ID")
     parser.add_argument("--restaurants-file", type=str, help="File with list of CAMIS IDs to update")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
@@ -457,69 +553,69 @@ def main():
 
     # Set logging level based on verbose flag
     if args.verbose:
-        print_debug("Verbose logging enabled.") # DEBUG PRINT
+        print_debug("Verbose logging enabled.")
         logging.getLogger().setLevel(logging.DEBUG)
 
     logger.info("Starting database update process")
-    print_debug("Parsed arguments. Starting update logic.") # DEBUG PRINT
+    print_debug("Parsed arguments. Starting update logic.")
 
-    # Update specific restaurants if requested
+    # Determine update mode
     if args.restaurant:
-        print_debug(f"Mode: Update specific restaurant (CAMIS: {args.restaurant})") # DEBUG PRINT
-        data = fetch_restaurant_by_camis(args.restaurant)
-        if data:
-            update_database(data)
-            logger.info(f"Updated restaurant {args.restaurant}")
-        else:
-            logger.warning(f"No data found for restaurant {args.restaurant}")
+        print_debug(f"Mode: Update specific restaurant (CAMIS: {args.restaurant})")
+        update_specific_restaurants([args.restaurant]) # Use the list-based function
 
-    # Update restaurants from file if requested
     elif args.restaurants_file:
-        print_debug(f"Mode: Update restaurants from file ({args.restaurants_file})") # DEBUG PRINT
+        print_debug(f"Mode: Update restaurants from file ({args.restaurants_file})")
         try:
             with open(args.restaurants_file, 'r') as f:
                 camis_list = [line.strip() for line in f if line.strip()]
-                print_debug(f"Found {len(camis_list)} CAMIS IDs in file.") # DEBUG PRINT
-                update_specific_restaurants(camis_list)
+                print_debug(f"Found {len(camis_list)} CAMIS IDs in file.")
+                if camis_list:
+                    update_specific_restaurants(camis_list)
+                else:
+                    logger.warning("Restaurants file is empty.")
+        except FileNotFoundError:
+             logger.error(f"Restaurants file not found: {args.restaurants_file}")
+             print_debug(f"ERROR: Restaurants file not found: {args.restaurants_file}")
         except Exception as e:
             logger.error(f"Error processing restaurants file: {e}")
-            print_debug(f"ERROR processing restaurants file: {e}") # DEBUG PRINT
+            print_debug(f"ERROR processing restaurants file: {e}")
+            logger.error(traceback.format_exc())
 
-    # Full sync if requested
     elif args.full_sync:
-        print_debug("Mode: Full sync") # DEBUG PRINT
+        print_debug("Mode: Full sync")
         logger.info("Performing FULL data sync...")
         data = fetch_all_data()
         if data:
-            update_database(data)
+            update_database_batch(data) # Use batch update
             logger.info(f"Full sync complete")
         else:
             logger.warning("No data fetched from API for full sync")
 
-    # Otherwise do normal update with specified days
-    else:
-        print_debug(f"Mode: Incremental update (Days: {args.days})") # DEBUG PRINT
+    else: # Default: Incremental update
+        print_debug(f"Mode: Incremental update (Days: {args.days})")
         logger.info(f"Performing incremental update for past {args.days} days...")
         data = fetch_data(days_back=args.days)
         if data:
-            update_database(data)
+            update_database_batch(data) # Use batch update
             logger.info(f"Update complete")
         else:
             logger.warning("No data fetched from API")
 
     logger.info("Database update process completed")
-    print_debug("--- main() finished ---") # DEBUG PRINT
+    print_debug("--- main() finished ---")
 
 if __name__ == "__main__":
-    # This block executes when the script is run directly
-    print_debug("Script execution started (__name__ == '__main__').") # DEBUG PRINT
+    print_debug("Script execution started (__name__ == '__main__').")
     try:
         main()
     except Exception as e:
-        # Catch any uncaught exceptions from main()
         print_debug(f"FATAL: Uncaught exception in main: {e}")
         logger.critical(f"Uncaught exception in main: {e}")
         logger.critical(traceback.format_exc())
     finally:
-        print_debug("Script execution finished (__name__ == '__main__').") # DEBUG PRINT
+        # --- ADDED LOGGING SHUTDOWN ---
+        print_debug("Shutting down logging...")
+        logging.shutdown()
+        print_debug("Script execution finished (__name__ == '__main__').")
 
