@@ -1,4 +1,4 @@
-# app_search.py - Cleaned Version with Redis Fix
+# app_search.py - Final Cleaned Version
 
 # Standard library imports
 import os
@@ -105,6 +105,7 @@ def sanitize_input(input_str):
 
 @app.route('/', methods=['GET'])
 def root():
+    # Keep minimal logging for health checks / basic verification
     logger.info("Received request for / route")
     return jsonify({"status": "ok", "message": "CleanPlate API is running"})
 
@@ -121,7 +122,7 @@ def search():
     cache_key = f"search:{normalized_name_for_key}"
     CACHE_TTL_SECONDS = 3600 * 4 # 4 hours
 
-    # --- MODIFIED: Use get_redis_client() for Cache Check ---
+    # --- Use get_redis_client() for Cache Check ---
     redis_conn = get_redis_client() # Attempt to get/initialize client
     if redis_conn:
         try:
@@ -129,7 +130,6 @@ def search():
             if cached_result_str:
                 logger.info(f"Cache hit for search: '{name}'")
                 try:
-                    # Attempt to load JSON from cache
                     return jsonify(json.loads(cached_result_str))
                 except json.JSONDecodeError as json_err:
                      logger.error(f"Error decoding cached JSON for key {cache_key}: {json_err}. Fetching from DB.")
@@ -145,13 +145,12 @@ def search():
              logger.error(f"Unexpected error during Redis GET {cache_key}: {e}")
              sentry_sdk.capture_exception(e) # Fall through to DB
     else:
-        # This logs if get_redis_client() returned None (connection failed)
-        logger.warning("Redis client unavailable (failed to connect), skipping cache check.")
-    # --- END MODIFIED Cache Check ---
+        logger.warning("Redis client unavailable, skipping cache check.")
+    # --- END Cache Check ---
 
-    # --- Database Query Logic (remains the same) ---
+    # --- Database Query Logic ---
     logger.info(f"DB query for search: '{name}'")
-    # ... (Sanitize input, build query, execute with retry) ...
+    # ... (rest of database query and result processing logic remains the same) ...
     name_with_periods, name_without_periods = sanitize_input(name)
     if '.' not in name and len(name_without_periods) >= 2: name_with_added_periods = '.'.join(list(name_without_periods))
     else: name_with_added_periods = name_with_periods
@@ -178,7 +177,6 @@ def search():
     if db_results is None: logger.error("db_results is None after loop without error."); raise Exception("Failed to retrieve results.")
     if not db_results:
         logger.info(f"No DB results for search: {name}")
-        # --- MODIFIED: Use get_redis_client() for Cache Store ---
         redis_conn_store = get_redis_client() # Get client instance again
         if redis_conn_store:
             try:
@@ -187,11 +185,10 @@ def search():
             except redis.exceptions.RedisError as redis_err:
                  logger.error(f"Redis SETEX error empty key {cache_key}: {redis_err}")
                  sentry_sdk.capture_exception(redis_err)
-        # --- END MODIFIED Cache Store ---
         return jsonify([])
     # --- End Database Query Logic ---
 
-    # --- Process Results (remains the same) ---
+    # --- Process Results ---
     logger.debug("Processing DB results..."); restaurant_dict = {}
     # ... (rest of result processing logic) ...
     for row in db_results:
@@ -209,7 +206,7 @@ def search():
     logger.debug("Finished processing DB results.")
     # --- End Process Results ---
 
-    # --- MODIFIED: Use get_redis_client() for Cache Store ---
+    # --- Store Result in Cache ---
     redis_conn_store_success = get_redis_client() # Get client instance again
     if redis_conn_store_success:
         try:
@@ -220,7 +217,7 @@ def search():
         except redis.exceptions.RedisError as redis_err: logger.error(f"Redis SETEX error cache key {cache_key}: {redis_err}"); sentry_sdk.capture_exception(redis_err)
         except TypeError as json_err: logger.error(f"Error serializing results JSON {cache_key}: {json_err}"); sentry_sdk.capture_exception(json_err)
         except Exception as e: logger.error(f"Unexpected error Redis SETEX {cache_key}: {e}"); sentry_sdk.capture_exception(e)
-    # --- END MODIFIED Cache Store ---
+    # --- End Store Result in Cache ---
 
     logger.info(f"DB search '{name}' OK, returning {len(formatted_results)} restaurants.")
     return jsonify(formatted_results)
@@ -311,5 +308,5 @@ if __name__ == "__main__":
     logger.info(f"Starting Flask app locally via app.run() on {APIConfig.HOST}:{APIConfig.PORT} with DEBUG={APIConfig.DEBUG}")
     app.run( host=APIConfig.HOST, port=APIConfig.PORT, debug=APIConfig.DEBUG )
 
-logger.info("app_search.py: Module loaded completely.")
+logger.info("app_search.py: Module loaded completely.") # Final log after definitions
 
