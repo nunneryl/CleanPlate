@@ -1,4 +1,8 @@
-# app_search.py - Add More Logging
+# app_search.py - Add print Statements for Debugging
+
+# --- ADD PRINT HERE ---
+print("--- PRINT DEBUG: app_search.py: TOP LEVEL ---", flush=True)
+# ----------------------
 
 # Standard library imports
 import os
@@ -7,8 +11,15 @@ import logging
 import json
 import threading
 import secrets
+import sys # Import sys for explicit flushing
+
+# --- ADD PRINT HERE ---
+print("--- PRINT DEBUG: app_search.py: Imports done ---", flush=True)
+# ----------------------
+
 
 # Third-party imports
+# ... (keep existing imports: sentry_sdk, Flask, CORS, psycopg2, redis) ...
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
 from flask import Flask, jsonify, request, make_response
@@ -16,27 +27,20 @@ from flask_cors import CORS
 import psycopg2
 import redis
 
-# --- ADD LOGGING HERE ---
-# This log should appear once per worker when the module is loaded
-logging.info("--- app_search.py: Module loading ---")
-# ------------------------
 
 # Local application imports
 try:
     from db_manager import DatabaseConnection, redis_client
-    logging.info("--- app_search.py: Imported db_manager successfully ---")
+    print("--- PRINT DEBUG: app_search.py: Imported db_manager ---", flush=True)
 except ImportError as e:
-    logging.critical(f"--- app_search.py: FAILED to import db_manager: {e} ---")
-    # Set dummy values if import fails to prevent later NameErrors potentially
-    DatabaseConnection = None
-    redis_client = None
+    print(f"--- PRINT DEBUG: app_search.py: FAILED to import db_manager: {e} ---", flush=True)
+    DatabaseConnection = None; redis_client = None
 
 try:
     from config import APIConfig, SentryConfig, DatabaseConfig, RedisConfig
-    logging.info("--- app_search.py: Imported config successfully ---")
+    print("--- PRINT DEBUG: app_search.py: Imported config ---", flush=True)
 except ImportError as e:
-    logging.critical(f"--- app_search.py: FAILED to import config: {e} ---")
-    # Define dummy classes if import fails
+    print(f"--- PRINT DEBUG: app_search.py: FAILED to import config: {e} ---", flush=True)
     class APIConfig: DEBUG = False; UPDATE_SECRET_KEY = None
     class SentryConfig: SENTRY_DSN = None
     class DatabaseConfig: pass
@@ -46,43 +50,43 @@ except ImportError as e:
 try:
     from update_database import run_database_update
     update_logic_imported = True
-    logging.info("--- app_search.py: Imported run_database_update successfully ---")
+    print("--- PRINT DEBUG: app_search.py: Imported run_database_update ---", flush=True)
 except ImportError as e:
-    logging.error(f"--- app_search.py: FAILED to import run_database_update: {e} ---")
+    print(f"--- PRINT DEBUG: app_search.py: FAILED to import run_database_update: {e} ---", flush=True)
     update_logic_imported = False
     def run_database_update():
-         logging.error("--- app_search.py: DUMMY run_database_update called ---")
+         print("--- PRINT DEBUG: app_search.py: DUMMY run_database_update called ---", flush=True)
 
 
 # --- Sentry Initialization ---
+# ... (keep existing Sentry init) ...
 if SentryConfig.SENTRY_DSN:
     try:
         sentry_sdk.init(
             dsn=SentryConfig.SENTRY_DSN, integrations=[FlaskIntegration()],
             traces_sample_rate=1.0, environment="development" if APIConfig.DEBUG else "production",
         )
-        logging.info("Sentry initialized successfully.")
+        print("--- PRINT DEBUG: Sentry initialized ---", flush=True)
     except Exception as e:
-         logging.error(f"Failed to initialize Sentry: {e}")
+         print(f"--- PRINT DEBUG: Failed to initialize Sentry: {e} ---", flush=True)
 else:
-    logging.warning("SENTRY_DSN not set, Sentry not initialized.")
-# --- End Sentry Initialization ---
+    print("--- PRINT DEBUG: SENTRY_DSN not set, Sentry not initialized. ---", flush=True)
 
 # --- Logging Setup ---
-# Configure logging ONCE here
+# Keep logging setup, but prints might be more reliable for this specific issue
 logging.basicConfig(
     level=logging.INFO if not APIConfig.DEBUG else logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    force=True # Reconfigure logging if already set
+    force=True
 )
-logger = logging.getLogger(__name__) # Get logger for this module
-logger.info("--- app_search.py: Logging configured ---")
+logger = logging.getLogger(__name__)
+print("--- PRINT DEBUG: Logging configured ---", flush=True)
 # --- End Logging Setup ---
 
 # --- Flask App Initialization ---
 app = Flask(__name__)
 CORS(app)
-logger.info("--- app_search.py: Flask app created ---")
+print("--- PRINT DEBUG: Flask app created ---", flush=True)
 # --- End Flask App Initialization ---
 
 # --- Helper Functions ---
@@ -95,23 +99,21 @@ def sanitize_input(input_str):
     sanitized_input = re.sub(r"[^\w\s']", "", input_str)
     no_periods_sanitized = re.sub(r"[^\w\s']", "", no_periods_version)
     return sanitized_input, no_periods_sanitized
-# --- End Helper Functions ---
-
 
 # --- API Routes ---
 
-# --- ADDED: Simple root route for testing ---
 @app.route('/', methods=['GET'])
 def root():
+    print("--- PRINT DEBUG: Received request for / route ---", flush=True)
     logger.info("--- app_search.py: Received request for / route ---")
     return jsonify({"status": "ok", "message": "CleanPlate API is running"})
-# --- END ADDED: Simple root route ---
 
+# ... (keep /search, /recent, /test-db-connection routes, maybe add print() inside them too) ...
 @app.route('/search', methods=['GET'])
 def search():
-    """ Searches restaurants, uses cache, retries DB on specific errors. """
-    logger.info("--- app_search.py: Received request for /search ---") # Added logging marker
-    # ... (rest of your search function) ...
+    print("--- PRINT DEBUG: Received request for /search ---", flush=True)
+    logger.info("--- app_search.py: Received request for /search ---")
+    # ... (rest of search) ...
     name = request.args.get('name', '').strip()
     if not name: logger.warning("Search request received with empty name parameter."); return jsonify({"error": "Search term is empty", "status": "error"}), 400
     normalized_name_for_key = name.replace("’", "'").replace("‘", "'").lower().strip()
@@ -179,11 +181,11 @@ def search():
     logger.info(f"DB search '{name}' OK, returning {len(formatted_results)} restaurants.")
     return jsonify(formatted_results)
 
-# ... (keep /recent and /test-db-connection routes) ...
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
-    """ Fetches recently graded (A/B/C) restaurants. """
-    logger.info("--- app_search.py: Received request for /recent ---") # Added logging marker
+    print("--- PRINT DEBUG: Received request for /recent ---", flush=True)
+    logger.info("--- app_search.py: Received request for /recent ---")
+    # ... (rest of recent) ...
     days = request.args.get('days', '7');
     try: days = int(days); days = 7 if days <= 0 else days
     except ValueError: days = 7
@@ -202,8 +204,9 @@ def recent_restaurants():
 
 @app.route('/test-db-connection', methods=['GET'])
 def test_db_connection():
-    """ Simple endpoint to test database connectivity. """
-    logger.info("--- app_search.py: Received request for /test-db-connection ---") # Added logging marker
+    print("--- PRINT DEBUG: Received request for /test-db-connection ---", flush=True)
+    logger.info("--- app_search.py: Received request for /test-db-connection ---")
+    # ... (rest of test-db-connection) ...
     try:
         with DatabaseConnection() as conn:
             with conn.cursor() as cursor:
@@ -215,40 +218,68 @@ def test_db_connection():
 
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
-    """ Securely triggers the database update process in a background thread. """
-    # --- ADDED LOGGING HERE ---
+    # --- ADDED PRINT HERE ---
+    print(f"--- PRINT DEBUG: /trigger-update: Request received (Top of function) ---", flush=True)
+    # ------------------------
     logger.info("--- /trigger-update: Request received (Top of function) ---")
-    # --------------------------
 
-    if not update_logic_imported: logger.error("Update logic unavailable."); return jsonify({"status": "error", "message": "Update logic unavailable."}), 500
-    provided_key = request.headers.get('X-Update-Secret'); expected_key = APIConfig.UPDATE_SECRET_KEY
-    if not expected_key: logger.error("UPDATE_SECRET_KEY not configured."); return jsonify({"status": "error", "message": "Update trigger not configured."}), 500
-    if not provided_key or not secrets.compare_digest(provided_key, expected_key): logger.warning("Invalid/missing secret key for /trigger-update."); return jsonify({"status": "error", "message": "Unauthorized."}), 403
+    if not update_logic_imported:
+        print("--- PRINT DEBUG: /trigger-update: Update logic unavailable ---", flush=True)
+        logger.error("Update logic unavailable."); return jsonify({"status": "error", "message": "Update logic unavailable."}), 500
+
+    provided_key = request.headers.get('X-Update-Secret')
+    expected_key = APIConfig.UPDATE_SECRET_KEY
+    print(f"--- PRINT DEBUG: /trigger-update: Provided Key: {'Exists' if provided_key else 'Missing'}, Expected Key: {'Exists' if expected_key else 'Missing'} ---", flush=True)
+
+
+    if not expected_key:
+        print("--- PRINT DEBUG: /trigger-update: Expected key not configured ---", flush=True)
+        logger.error("UPDATE_SECRET_KEY not configured."); return jsonify({"status": "error", "message": "Update trigger not configured."}), 500
+
+    # Use a variable to store comparison result for logging
+    keys_match = provided_key and secrets.compare_digest(provided_key, expected_key)
+    print(f"--- PRINT DEBUG: /trigger-update: Keys Match: {keys_match} ---", flush=True)
+
+    if not keys_match:
+        print("--- PRINT DEBUG: /trigger-update: Unauthorized access attempt ---", flush=True)
+        logger.warning("Invalid/missing secret key for /trigger-update."); return jsonify({"status": "error", "message": "Unauthorized."}), 403
+
+    print("--- PRINT DEBUG: /trigger-update: Key validated, attempting to start thread ---", flush=True)
     logger.info("Secret key validated. Triggering update in background.")
     try:
         update_thread = threading.Thread(target=run_database_update, daemon=True); update_thread.start()
-    except Exception as e: logger.error(f"Failed to start update thread: {e}", exc_info=True); sentry_sdk.capture_exception(e); return jsonify({"status": "error", "message": "Failed to start update process."}), 500
+        print("--- PRINT DEBUG: /trigger-update: Thread started successfully ---", flush=True)
+    except Exception as e:
+        print(f"--- PRINT DEBUG: /trigger-update: FAILED to start thread: {e} ---", flush=True)
+        logger.error(f"Failed to start update thread: {e}", exc_info=True); sentry_sdk.capture_exception(e); return jsonify({"status": "error", "message": "Failed to start update process."}), 500
+
     logger.info("Successfully launched background update thread.")
+    print("--- PRINT DEBUG: /trigger-update: Returning 202 Accepted ---", flush=True)
     return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
 
 
 # --- Keep Error Handlers ---
+# ... (keep existing @app.errorhandler(404) and @app.errorhandler(500)) ...
 @app.errorhandler(404)
 def not_found(e):
     """ Handles 404 Not Found errors. """
+    print(f"--- PRINT DEBUG: 404 Error Handler triggered for {request.url} ---", flush=True)
     logger.warning(f"404 Not Found error for URL: {request.url}")
     return jsonify({"error": "The requested resource was not found", "status": "error"}), 404
 
 @app.errorhandler(500)
 def server_error(e):
     """ Handles 500 Internal Server errors. """
+    print(f"--- PRINT DEBUG: 500 Error Handler triggered for {request.url} ---", flush=True)
     logger.error(f"500 Internal Server Error handling request for {request.url}: {e}", exc_info=True)
     return jsonify({"error": "An internal server error occurred", "status": "error"}), 500
 
+
 # --- Keep Main Execution Block ---
 if __name__ == "__main__":
+    print("--- PRINT DEBUG: Running locally via __main__ ---", flush=True)
     logger.info(f"--- app_search.py: Running locally via __main__ ---")
     app.run( host=APIConfig.HOST, port=APIConfig.PORT, debug=APIConfig.DEBUG )
 
-logger.info("--- app_search.py: Module loaded completely ---") # Log at the end of module execution
+print("--- PRINT DEBUG: app_search.py: Module loaded completely ---", flush=True)
 
