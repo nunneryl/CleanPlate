@@ -1,8 +1,4 @@
-# app_search.py - Full Version with Debug Logging
-
-# --- ADD PRINT HERE ---
-print("--- PRINT DEBUG: app_search.py: TOP LEVEL ---", flush=True)
-# ----------------------
+# app_search.py - Cleaned Version with Redis Fix
 
 # Standard library imports
 import os
@@ -11,12 +7,7 @@ import logging
 import json
 import threading
 import secrets
-import sys # Import sys for explicit flushing
-
-# --- ADD PRINT HERE ---
-print("--- PRINT DEBUG: app_search.py: Imports done ---", flush=True)
-# ----------------------
-
+import sys # Import sys if using StreamHandler(sys.stdout) below
 
 # Third-party imports
 import sentry_sdk
@@ -26,44 +17,40 @@ from flask_cors import CORS
 import psycopg2 # Import psycopg2 for specific DB error handling if needed
 import redis # Import redis for specific Redis error handling
 
-# --- ADD PRINT HERE ---
-print("--- PRINT DEBUG: app_search.py: Third-party imports done ---", flush=True)
-# ----------------------
-
-
 # Local application imports
 try:
-    from db_manager import DatabaseConnection, redis_client
-    print("--- PRINT DEBUG: app_search.py: Imported db_manager ---", flush=True)
+    # Import DatabaseConnection context manager and the get_redis_client function
+    from db_manager import DatabaseConnection, get_redis_client
+    logging.info("Imported db_manager successfully.")
 except ImportError as e:
-    print(f"--- PRINT DEBUG: app_search.py: FAILED to import db_manager: {e} ---", flush=True)
-    # Set dummy values if import fails to prevent later NameErrors potentially
+    logging.critical(f"FAILED to import db_manager: {e}")
     DatabaseConnection = None
-    redis_client = None
+    # Define dummy get_redis_client if import fails
+    def get_redis_client(): return None
 
 try:
     # Import all config classes
     from config import APIConfig, SentryConfig, DatabaseConfig, RedisConfig
-    print("--- PRINT DEBUG: app_search.py: Imported config ---", flush=True)
+    logging.info("Imported config successfully.")
 except ImportError as e:
-    print(f"--- PRINT DEBUG: app_search.py: FAILED to import config: {e} ---", flush=True)
+    logging.critical(f"FAILED to import config: {e}")
     # Define dummy classes if import fails
     class APIConfig: DEBUG = False; UPDATE_SECRET_KEY = None
     class SentryConfig: SENTRY_DSN = None
     class DatabaseConfig: pass
     class RedisConfig: pass
 
-
 try:
     # Import the update function
     from update_database import run_database_update
     update_logic_imported = True
-    print("--- PRINT DEBUG: app_search.py: Imported run_database_update ---", flush=True)
+    logging.info("Imported run_database_update successfully.")
 except ImportError as e:
-    print(f"--- PRINT DEBUG: app_search.py: FAILED to import run_database_update: {e} ---", flush=True)
+    logging.error(f"FAILED to import run_database_update: {e}")
     update_logic_imported = False
+    # Define a dummy function if import fails
     def run_database_update():
-         print("--- PRINT DEBUG: app_search.py: DUMMY run_database_update called ---", flush=True)
+         logging.error("DUMMY run_database_update called - real function failed to import.")
 
 
 # --- Sentry Initialization ---
@@ -71,13 +58,14 @@ if SentryConfig.SENTRY_DSN:
     try:
         sentry_sdk.init(
             dsn=SentryConfig.SENTRY_DSN, integrations=[FlaskIntegration()],
-            traces_sample_rate=1.0, environment="development" if APIConfig.DEBUG else "production",
+            traces_sample_rate=1.0, # Adjust sample rate as needed
+            environment="development" if APIConfig.DEBUG else "production",
         )
-        print("--- PRINT DEBUG: Sentry initialized ---", flush=True)
+        logging.info("Sentry initialized successfully.")
     except Exception as e:
-         print(f"--- PRINT DEBUG: Failed to initialize Sentry: {e} ---", flush=True)
+         logging.error(f"Failed to initialize Sentry: {e}")
 else:
-    print("--- PRINT DEBUG: SENTRY_DSN not set, Sentry not initialized. ---", flush=True)
+    logging.warning("SENTRY_DSN not set, Sentry not initialized.")
 # --- End Sentry Initialization ---
 
 # --- Logging Setup ---
@@ -85,40 +73,28 @@ else:
 logging.basicConfig(
     level=logging.INFO if not APIConfig.DEBUG else logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    force=True # Reconfigure logging if already set
+    # Use force=True if needed to overwrite potential default configs
+    force=True # May require Python 3.8+
 )
 logger = logging.getLogger(__name__) # Get logger for this module
-print("--- PRINT DEBUG: Logging configured ---", flush=True)
+logger.info("Logging configured.")
 # --- End Logging Setup ---
 
 # --- Flask App Initialization ---
 app = Flask(__name__)
 CORS(app) # Enable CORS for all origins
-print("--- PRINT DEBUG: Flask app created ---", flush=True)
+logger.info("Flask app created.")
 # --- End Flask App Initialization ---
-
-# --- ADDED: before_request hook for debugging ---
-@app.before_request
-def log_request_info():
-    # Log basic info for ALL incoming requests before they hit the route handler
-    # Use logger first, then print as backup
-    try:
-        # Log headers as well for debugging the trigger request
-        logger.info(f"--- before_request: Method={request.method}, Path={request.path}, Headers={request.headers} ---")
-        print(f"--- PRINT DEBUG: before_request: Method={request.method}, Path={request.path} ---", flush=True)
-    except Exception as e:
-        # Log if there's an error just trying to log the request
-        logger.error(f"--- before_request: Error logging request info: {e} ---")
-        print(f"--- PRINT DEBUG: before_request: Error logging request info: {e} ---", flush=True)
-# --- END ADDED: before_request hook ---
-
 
 # --- Helper Functions ---
 def sanitize_input(input_str):
     """ Sanitizes the input string for search. """
     if not input_str: return "", ""
+    # Normalize different apostrophe types
     input_str = input_str.replace("’", "'").replace("‘", "'")
+    # Version without periods
     no_periods_version = input_str.replace(".", "")
+    # Allow letters, numbers, whitespace, standard apostrophe
     sanitized_input = re.sub(r"[^\w\s']", "", input_str)
     no_periods_sanitized = re.sub(r"[^\w\s']", "", no_periods_version)
     return sanitized_input, no_periods_sanitized
@@ -129,30 +105,53 @@ def sanitize_input(input_str):
 
 @app.route('/', methods=['GET'])
 def root():
-    print("--- PRINT DEBUG: Received request for / route ---", flush=True)
-    logger.info("--- app_search.py: Received request for / route ---")
+    logger.info("Received request for / route")
     return jsonify({"status": "ok", "message": "CleanPlate API is running"})
 
 @app.route('/search', methods=['GET'])
 def search():
-    """ Searches restaurants, uses cache, retries DB on specific errors. """
-    print("--- PRINT DEBUG: Received request for /search ---", flush=True)
-    logger.info("--- app_search.py: Received request for /search ---")
+    """ Searches restaurants, uses cache (with lazy init), retries DB. """
+    logger.info("Received request for /search")
     name = request.args.get('name', '').strip()
-    if not name: logger.warning("Search request received with empty name parameter."); return jsonify({"error": "Search term is empty", "status": "error"}), 400
+    if not name:
+        logger.warning("Search request received with empty name parameter.")
+        return jsonify({"error": "Search term is empty", "status": "error"}), 400
+
     normalized_name_for_key = name.replace("’", "'").replace("‘", "'").lower().strip()
-    cache_key = f"search:{normalized_name_for_key}"; CACHE_TTL_SECONDS = 3600 * 4
-    if redis_client:
+    cache_key = f"search:{normalized_name_for_key}"
+    CACHE_TTL_SECONDS = 3600 * 4 # 4 hours
+
+    # --- MODIFIED: Use get_redis_client() for Cache Check ---
+    redis_conn = get_redis_client() # Attempt to get/initialize client
+    if redis_conn:
         try:
-            cached_result_str = redis_client.get(cache_key)
+            cached_result_str = redis_conn.get(cache_key) # Use redis_conn
             if cached_result_str:
-                logger.info(f"Cache hit for search: '{name}'"); return jsonify(json.loads(cached_result_str))
-            else: logger.info(f"Cache miss for search: '{name}'")
-        except redis.exceptions.TimeoutError: logger.warning(f"Redis timeout GET for {cache_key}.")
-        except redis.exceptions.RedisError as redis_err: logger.error(f"Redis GET error for {cache_key}: {redis_err}"); sentry_sdk.capture_exception(redis_err)
-        except Exception as e: logger.error(f"Unexpected error Redis GET {cache_key}: {e}"); sentry_sdk.capture_exception(e)
-    else: logger.warning("Redis client unavailable, skipping cache check.")
+                logger.info(f"Cache hit for search: '{name}'")
+                try:
+                    # Attempt to load JSON from cache
+                    return jsonify(json.loads(cached_result_str))
+                except json.JSONDecodeError as json_err:
+                     logger.error(f"Error decoding cached JSON for key {cache_key}: {json_err}. Fetching from DB.")
+                     sentry_sdk.capture_exception(json_err) # Report bad cache data
+            else:
+                 logger.info(f"Cache miss for search: '{name}'")
+        except redis.exceptions.TimeoutError:
+             logger.warning(f"Redis timeout GET for {cache_key}. Fetching from DB.")
+        except redis.exceptions.RedisError as redis_err:
+             logger.error(f"Redis GET error for {cache_key}: {redis_err}")
+             sentry_sdk.capture_exception(redis_err) # Fall through to DB
+        except Exception as e:
+             logger.error(f"Unexpected error during Redis GET {cache_key}: {e}")
+             sentry_sdk.capture_exception(e) # Fall through to DB
+    else:
+        # This logs if get_redis_client() returned None (connection failed)
+        logger.warning("Redis client unavailable (failed to connect), skipping cache check.")
+    # --- END MODIFIED Cache Check ---
+
+    # --- Database Query Logic (remains the same) ---
     logger.info(f"DB query for search: '{name}'")
+    # ... (Sanitize input, build query, execute with retry) ...
     name_with_periods, name_without_periods = sanitize_input(name)
     if '.' not in name and len(name_without_periods) >= 2: name_with_added_periods = '.'.join(list(name_without_periods))
     else: name_with_added_periods = name_with_periods
@@ -165,8 +164,10 @@ def search():
             with DatabaseConnection() as conn:
                 with conn.cursor() as cursor:
                     logger.debug(f"Attempt {attempt + 1}: Executing search query"); cursor.execute(query, params); db_results = cursor.fetchall()
-                    columns = [desc[0] for desc in cursor.description]; logger.debug(f"Attempt {attempt + 1}: DB query OK, {len(db_results) if db_results else 0} rows.")
-                    last_db_error = None; break
+                    if db_results is not None:
+                        columns = [desc[0] for desc in cursor.description]; logger.debug(f"Attempt {attempt + 1}: DB query OK, {len(db_results)} rows.")
+                        last_db_error = None; break
+                    else: logger.error(f"Attempt {attempt + 1}: cursor.fetchall() returned None."); raise psycopg2.Error("fetchall returned None")
         except psycopg2.OperationalError as op_err:
             last_db_error = op_err; logger.warning(f"Attempt {attempt + 1}: DB OperationalError search '{name}': {op_err}"); sentry_sdk.capture_exception(op_err)
             if attempt < MAX_DB_RETRIES: logger.info(f"Retrying DB query (attempt {attempt + 2})..."); continue
@@ -177,11 +178,22 @@ def search():
     if db_results is None: logger.error("db_results is None after loop without error."); raise Exception("Failed to retrieve results.")
     if not db_results:
         logger.info(f"No DB results for search: {name}")
-        if redis_client:
-            try: redis_client.setex(cache_key, 60 * 15, json.dumps([])); logger.info(f"Cached empty result for key: {cache_key}")
-            except redis.exceptions.RedisError as redis_err: logger.error(f"Redis SETEX error empty key {cache_key}: {redis_err}"); sentry_sdk.capture_exception(redis_err)
+        # --- MODIFIED: Use get_redis_client() for Cache Store ---
+        redis_conn_store = get_redis_client() # Get client instance again
+        if redis_conn_store:
+            try:
+                redis_conn_store.setex(cache_key, 60 * 15, json.dumps([])) # Use redis_conn_store
+                logger.info(f"Cached empty result for key: {cache_key}")
+            except redis.exceptions.RedisError as redis_err:
+                 logger.error(f"Redis SETEX error empty key {cache_key}: {redis_err}")
+                 sentry_sdk.capture_exception(redis_err)
+        # --- END MODIFIED Cache Store ---
         return jsonify([])
+    # --- End Database Query Logic ---
+
+    # --- Process Results (remains the same) ---
     logger.debug("Processing DB results..."); restaurant_dict = {}
+    # ... (rest of result processing logic) ...
     for row in db_results:
         restaurant_data = dict(zip(columns, row)); camis = restaurant_data.get('camis'); inspection_date_obj = restaurant_data.get('inspection_date')
         if not camis: continue
@@ -195,20 +207,29 @@ def search():
     formatted_results = []
     for restaurant in restaurant_dict.values(): restaurant["inspections"] = list(restaurant["inspections"].values()); formatted_results.append(restaurant)
     logger.debug("Finished processing DB results.")
-    if redis_client:
+    # --- End Process Results ---
+
+    # --- MODIFIED: Use get_redis_client() for Cache Store ---
+    redis_conn_store_success = get_redis_client() # Get client instance again
+    if redis_conn_store_success:
         try:
-            serialized_data = json.dumps(formatted_results); redis_client.setex(cache_key, CACHE_TTL_SECONDS, serialized_data); logger.info(f"Stored search result in cache: {cache_key}")
+            serialized_data = json.dumps(formatted_results)
+            redis_conn_store_success.setex(cache_key, CACHE_TTL_SECONDS, serialized_data) # Use redis_conn_store_success
+            logger.info(f"Stored search result in cache: {cache_key}")
         except redis.exceptions.TimeoutError: logger.warning(f"Redis timeout SETEX for {cache_key}.")
         except redis.exceptions.RedisError as redis_err: logger.error(f"Redis SETEX error cache key {cache_key}: {redis_err}"); sentry_sdk.capture_exception(redis_err)
         except TypeError as json_err: logger.error(f"Error serializing results JSON {cache_key}: {json_err}"); sentry_sdk.capture_exception(json_err)
         except Exception as e: logger.error(f"Unexpected error Redis SETEX {cache_key}: {e}"); sentry_sdk.capture_exception(e)
+    # --- END MODIFIED Cache Store ---
+
     logger.info(f"DB search '{name}' OK, returning {len(formatted_results)} restaurants.")
     return jsonify(formatted_results)
 
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
-    print("--- PRINT DEBUG: Received request for /recent ---", flush=True)
-    logger.info("--- app_search.py: Received request for /recent ---")
+    """ Fetches recently graded (A/B/C) restaurants. """
+    logger.info("Received request for /recent")
+    # ... (rest of recent function - doesn't use Redis currently) ...
     days = request.args.get('days', '7');
     try: days = int(days); days = 7 if days <= 0 else days
     except ValueError: days = 7
@@ -225,10 +246,12 @@ def recent_restaurants():
     except psycopg2.Error as db_err: logger.error(f"Error fetching recent restaurants: {db_err}"); sentry_sdk.capture_exception(db_err); raise
     except Exception as e: logger.error(f"Unexpected error fetching recent restaurants: {e}", exc_info=True); sentry_sdk.capture_exception(e); raise
 
+
 @app.route('/test-db-connection', methods=['GET'])
 def test_db_connection():
-    print("--- PRINT DEBUG: Received request for /test-db-connection ---", flush=True)
-    logger.info("--- app_search.py: Received request for /test-db-connection ---")
+    """ Simple endpoint to test database connectivity. """
+    logger.info("Received request for /test-db-connection")
+    # ... (rest of test-db-connection function) ...
     try:
         with DatabaseConnection() as conn:
             with conn.cursor() as cursor:
@@ -240,77 +263,53 @@ def test_db_connection():
 
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
-    # --- ADDED TOP-LEVEL TRY/EXCEPT ---
+    """ Securely triggers the database update process in a background thread. """
+    logger.info("Received request for /trigger-update") # Keep this primary log
     try:
-        print(f"--- PRINT DEBUG: /trigger-update: ENTERING TRY BLOCK ---", flush=True)
-        logger.info("--- /trigger-update: Request received (Top of function) ---")
-
         if not update_logic_imported:
-            print("--- PRINT DEBUG: /trigger-update: Update logic unavailable ---", flush=True)
             logger.error("Update logic unavailable."); return jsonify({"status": "error", "message": "Update logic unavailable."}), 500
 
         provided_key = request.headers.get('X-Update-Secret')
         expected_key = APIConfig.UPDATE_SECRET_KEY
-        print(f"--- PRINT DEBUG: /trigger-update: Provided Key: {'Exists' if provided_key else 'Missing'}, Expected Key: {'Exists' if expected_key else 'Missing'} ---", flush=True)
-
 
         if not expected_key:
-            print("--- PRINT DEBUG: /trigger-update: Expected key not configured ---", flush=True)
             logger.error("UPDATE_SECRET_KEY not configured."); return jsonify({"status": "error", "message": "Update trigger not configured."}), 500
 
-        # Use a variable to store comparison result for logging
-        keys_match = provided_key and secrets.compare_digest(provided_key, expected_key)
-        print(f"--- PRINT DEBUG: /trigger-update: Keys Match: {keys_match} ---", flush=True)
-
-        if not keys_match:
-            print("--- PRINT DEBUG: /trigger-update: Unauthorized access attempt ---", flush=True)
+        if not provided_key or not secrets.compare_digest(provided_key, expected_key):
             logger.warning("Invalid/missing secret key for /trigger-update."); return jsonify({"status": "error", "message": "Unauthorized."}), 403
 
-        print("--- PRINT DEBUG: /trigger-update: Key validated, attempting to start thread ---", flush=True)
         logger.info("Secret key validated. Triggering update in background.")
         try:
             update_thread = threading.Thread(target=run_database_update, daemon=True); update_thread.start()
-            print("--- PRINT DEBUG: /trigger-update: Thread started successfully ---", flush=True)
         except Exception as e:
-            print(f"--- PRINT DEBUG: /trigger-update: FAILED to start thread: {e} ---", flush=True)
             logger.error(f"Failed to start update thread: {e}", exc_info=True); sentry_sdk.capture_exception(e); return jsonify({"status": "error", "message": "Failed to start update process."}), 500
 
         logger.info("Successfully launched background update thread.")
-        print("--- PRINT DEBUG: /trigger-update: Returning 202 Accepted ---", flush=True)
         return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
 
     except Exception as e:
-        # --- CATCH ALL EXCEPTIONS WITHIN THE ROUTE ---
-        print(f"--- PRINT DEBUG: /trigger-update: UNCAUGHT EXCEPTION in route handler: {e} ---", flush=True)
-        logger.error(f"--- /trigger-update: UNCAUGHT EXCEPTION in route handler: {e} ---", exc_info=True)
-        # Optionally send to Sentry here too if Flask's handler might miss it
-        # sentry_sdk.capture_exception(e)
-        # Return a generic 500 error
+        logger.error(f"Unexpected error in /trigger-update handler: {e}", exc_info=True)
+        sentry_sdk.capture_exception(e)
         return jsonify({"status": "error", "message": "Internal server error in trigger endpoint."}), 500
-    # --- END TOP-LEVEL TRY/EXCEPT ---
 
 
-# --- Keep Error Handlers ---
+# --- Error Handlers (Keep as is) ---
 @app.errorhandler(404)
 def not_found(e):
     """ Handles 404 Not Found errors. """
-    print(f"--- PRINT DEBUG: 404 Error Handler triggered for {request.url} ---", flush=True)
     logger.warning(f"404 Not Found error for URL: {request.url}")
     return jsonify({"error": "The requested resource was not found", "status": "error"}), 404
 
 @app.errorhandler(500)
 def server_error(e):
     """ Handles 500 Internal Server errors. """
-    print(f"--- PRINT DEBUG: 500 Error Handler triggered for {request.url} ---", flush=True)
     logger.error(f"500 Internal Server Error handling request for {request.url}: {e}", exc_info=True)
     return jsonify({"error": "An internal server error occurred", "status": "error"}), 500
 
-
-# --- Keep Main Execution Block ---
+# --- Main Execution Block (Keep as is) ---
 if __name__ == "__main__":
-    print("--- PRINT DEBUG: Running locally via __main__ ---", flush=True)
-    logger.info(f"--- app_search.py: Running locally via __main__ ---")
-    # Use Flask's development server (NOT for production)
+    logger.info(f"Starting Flask app locally via app.run() on {APIConfig.HOST}:{APIConfig.PORT} with DEBUG={APIConfig.DEBUG}")
     app.run( host=APIConfig.HOST, port=APIConfig.PORT, debug=APIConfig.DEBUG )
 
-print("--- PRINT DEBUG: app_search.py: Module loaded completely ---", flush=True)
+logger.info("app_search.py: Module loaded completely.")
+
