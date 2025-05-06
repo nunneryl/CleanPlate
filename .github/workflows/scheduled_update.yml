@@ -27,7 +27,7 @@ jobs:
           # -X POST : Specify the POST method
           # -H "Header: Value" : Add necessary headers
           # -H "Content-Length: 0" : Required for POST requests with no body
-          curl -f -S -X POST "$APP_URL/trigger-update" \
+          curl -f -S -v -X POST "$APP_URL/trigger-update" \
                -H "X-Update-Secret: $UPDATE_SECRET" \
                -H "Content-Length: 0"
 
