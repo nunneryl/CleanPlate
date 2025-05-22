@@ -1,4 +1,4 @@
-# gunicorn_config.py - Reverted to include DB init
+# gunicorn_config.py
 import logging
 import os # Import os if needed for other settings later
 
@@ -10,6 +10,11 @@ accesslog = '-'
 # Set the log level (info shows startup messages, requests, etc.)
 loglevel = 'info'
 
+# --- INCREASED WORKER TIMEOUT ---
+# Set a longer timeout (e.g., 180 seconds = 3 minutes, or 300 seconds = 5 minutes)
+# Gunicorn's default is 30 seconds.
+timeout = 180
+
 # Optional: Bind to the port specified by Railway
 # Gunicorn often picks this up automatically, but being explicit can help
 # bind = f"0.0.0.0:{os.environ.get('PORT', '8080')}"
@@ -19,14 +24,13 @@ loglevel = 'info'
 
 # --- post_fork hook ---
 # This hook runs in each worker process *after* it's created.
-# Make sure there's only ONE definition line below
 def post_fork(server, worker):
     # Use Gunicorn's logger for messages related to the hook itself
     server.log.info(f"Worker {worker.pid}: Initializing database pool via post_fork hook...")
     try:
         # Import DatabaseManager *inside* the hook function
         # This avoids potential import issues in the master process
-        from db_manager import DatabaseManager
+        from db_manager import DatabaseManager # Assuming your DB manager is named this
         # Initialize the pool for this specific worker process
         DatabaseManager.initialize_pool()
         server.log.info(f"Worker {worker.pid}: Database pool initialization attempt complete.")
