@@ -358,28 +358,28 @@ def update_specific_restaurants(camis_list):
 
 
 # --- run_database_update function (entry point called by Flask) ---
-def run_database_update(days_back=2):
+def run_database_update(days_back=2): # Default is still 2, but we'll override for the call
     """Main entry point for running the update logic, called from Flask."""
-    print_debug(f"--- run_database_update called (days_back={days_back}) ---")
-    logger.info("Starting database update process via run_database_update")
+    
+    # <<< TEMPORARY CHANGE FOR CATCH-UP: Set days_back to a larger value for this run >>>
+    catch_up_days = 20 
+    logger.info(f"--- SCRIPT DEBUG: --- run_database_update called (OVERRIDING days_back for catch-up to {catch_up_days}) ---")
+    
+    logger.info("Starting database update process via run_database_update (CATCH-UP RUN)") # Added note
     try:
-        logger.info(f"Performing incremental update for past {days_back} days...")
-        data = fetch_data(days_back=days_back)
+        logger.info(f"Performing catch-up update for past {catch_up_days} days...")
+        data = fetch_data(days_back=catch_up_days) # <<< USING catch_up_days HERE >>>
         if data:
-            restaurants_updated, violations_inserted = update_database_batch(data) # Use batch update
-            logger.info(f"run_database_update: Batch update processed. Restaurants: {restaurants_updated}, Violations: {violations_inserted}")
+            restaurants_updated, violations_inserted = update_database_batch(data)
+            logger.info(f"run_database_update (CATCH-UP): Batch update processed. Restaurants: {restaurants_updated}, Violations: {violations_inserted}")
         else:
-            logger.warning("run_database_update: No data fetched from API")
+            logger.warning("run_database_update (CATCH-UP): No data fetched from API for the catch-up period.")
 
     except Exception as e:
-        print_debug(f"FATAL: Uncaught exception in run_database_update: {e}")
-        logger.critical(f"Uncaught exception in run_database_update: {e}", exc_info=True) # <<< ADDED exc_info
-        # logger.critical(traceback.format_exc()) # Already logged with exc_info
-        # Optionally notify Sentry if not automatically captured from critical log
-        # import sentry_sdk
-        # sentry_sdk.capture_exception(e)
+        logger.critical(f"Uncaught exception in run_database_update (CATCH-UP): {e}", exc_info=True)
     finally:
-        logger.info("Database update process via run_database_update finished.")
-        print_debug("--- run_database_update finished ---")
+        logger.info("Database update process via run_database_update (CATCH-UP) finished.")
+        logger.info(f"--- SCRIPT DEBUG: --- run_database_update (CATCH-UP using {catch_up_days} days) finished ---")
+
 
 # --- REMOVED: if __name__ == '__main__' block and old main() function ---
