@@ -7,10 +7,9 @@ errorlog = '-'  # Send error logs to stderr
 accesslog = '-' # Send access logs to stdout
 loglevel = 'info' # Set the log level
 
-# --- INCREASED WORKER TIMEOUT FOR CATCH-UP ---
-# Set a longer timeout (e.g., 300 seconds = 5 minutes) for the catch-up.
-# Gunicorn's default is 30 seconds. Remember to change back to 180 after.
-timeout = 300
+# --- REVERTED WORKER TIMEOUT ---
+# Set back to a reasonable timeout for daily operations (e.g., 180 seconds = 3 minutes)
+timeout = 180
 
 # Optional: Bind to the port specified by Railway
 # bind = f"0.0.0.0:{os.environ.get('PORT', '8080')}"
