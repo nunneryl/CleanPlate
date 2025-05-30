@@ -40,7 +40,7 @@ def convert_date(date_str):
         return None
 
 # --- fetch_data function (no changes needed, uses logger) ---
-def fetch_data(days_back=8, max_retries=4):
+def fetch_data(days_back=5, max_retries=4):
     """Fetch data from NYC API with pagination"""
     print_debug(f"Entering fetch_data for past {days_back} days...")
     logger.info(f"Fetching data from the NYC API for the past {days_back} days...")
