@@ -195,40 +195,30 @@ def search_original():
     return jsonify(formatted_results)
 
 # --- NEW /search_fts_test ENDPOINT (for testing FTS with explicit prefix for single terms) ---
+# --- NEW /search_fts_test ENDPOINT (Simplified FTS query string) ---
 @app.route('/search_fts_test', methods=['GET'])
 def search_fts_test():
     logger.info("Received request for TEST /search_fts_test endpoint")
     search_term_from_user = request.args.get('name', '').strip()
     if not search_term_from_user:
+        logger.warning("FTS Test: Search request received with empty name parameter.")
         return jsonify({"error": "Search term is empty"}), 400
 
-    normalized_user_input_for_query = normalize_text(search_term_from_user) # Aggressive normalize
+    # Use aggressive Python normalize_text for user input
+    normalized_user_input_for_query = normalize_text(search_term_from_user)
     if not normalized_user_input_for_query:
-        logger.info(f"FTS Test: Search term '{search_term_from_user}' empty after normalization.")
+        logger.info(f"FTS Test: Search term '{search_term_from_user}' became empty after Python normalization.")
         return jsonify([])
 
-    # <<<< START OF MODIFIED LOGIC FOR EXPLICIT PREFIX >>>>
-    query_terms = normalized_user_input_for_query.split() # Should be empty if input was all spaces
-                                                        # but normalize_text also handles this.
-                                                        # If normalized_user_input_for_query is "xian", query_terms = ["xian"]
-                                                        # If normalized_user_input_for_query is "eatsplace", query_terms = ["eatsplace"]
-    
-    if len(query_terms) == 1 and query_terms[0]: # Check if there's exactly one term and it's not empty
-        final_query_string_for_fts = query_terms[0] + ":*"
-    elif len(query_terms) > 1: # For multiple terms, websearch_to_tsquery handles ANDing.
-        # websearch_to_tsquery typically applies prefix to the last term.
-        # We can pass the Python-normalized multi-word string directly.
-        final_query_string_for_fts = normalized_user_input_for_query
-    else: # Should not happen if normalized_user_input_for_query was checked for emptiness
-        logger.warning(f"FTS Test: normalized_user_input_for_query ('{normalized_user_input_for_query}') resulted in no query_terms.")
-        return jsonify([])
+    # <<<< START OF SIMPLIFIED LOGIC FOR FTS QUERY STRING >>>>
+    # Let websearch_to_tsquery handle the interpretation of the fully Python-normalized input directly
+    final_query_string_for_fts = normalized_user_input_for_query
 
+    logger.info(f"FTS Test: DB query using websearch_to_tsquery with FTS query input: '{final_query_string_for_fts}' (derived from user input '{search_term_from_user}')")
+    # <<<< END OF SIMPLIFIED LOGIC FOR FTS QUERY STRING >>>>
 
-    logger.info(f"FTS Test: DB query using websearch_to_tsquery with FTS query string: '{final_query_string_for_fts}' (from normalized input '{normalized_user_input_for_query}')")
-    # <<<< END OF MODIFIED LOGIC FOR EXPLICIT PREFIX >>>>
-
-    cache_key = f"search_v6_fts_test:{final_query_string_for_fts}" # Updated cache key with new logic
-    CACHE_TTL_SECONDS = 3600 * 1
+    cache_key = f"search_v7_fts_test:{final_query_string_for_fts}" # Updated cache key for this logic version
+    CACHE_TTL_SECONDS = 3600 * 1 # Shorter cache for testing, e.g., 1 hour
 
     redis_conn = get_redis_client()
     if redis_conn:
@@ -237,9 +227,13 @@ def search_fts_test():
             if cached_result_str:
                 logger.info(f"FTS Test: Cache hit for key: {cache_key}")
                 return jsonify(json.loads(cached_result_str))
+            else:
+                logger.info(f"FTS Test: Cache miss for key: {cache_key}")
         except Exception as e:
-             logger.error(f"FTS Test: Redis GET error for key {cache_key}: {e}"); sentry_sdk.capture_exception(e)
+             logger.error(f"FTS Test: Redis GET error for key {cache_key}: {e}")
+             sentry_sdk.capture_exception(e) # Fall through to DB
 
+    # The SQL query string itself remains the same as the last FTS version
     query = """
         SELECT
             r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
@@ -252,29 +246,38 @@ def search_fts_test():
         ORDER BY rank DESC, r.dba ASC, r.inspection_date DESC
         LIMIT 100;
     """
-    params = (final_query_string_for_fts, final_query_string_for_fts) # Use the potentially modified query string
+    # Params now uses the simplified final_query_string_for_fts
+    params = (final_query_string_for_fts, final_query_string_for_fts)
     
     db_results_raw = None
-    columns_fts = [] # Use a different variable name for columns to avoid scope issues
+    columns_fts = [] # Initialize to prevent NameError if try block fails early
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             logger.debug(f"FTS Test: Executing query with params: {params}")
             cursor.execute(query, params)
             db_results_raw = cursor.fetchall()
-            if db_results_raw is not None:
+            if db_results_raw is not None: # Check if fetchall returned something
                 columns_fts = [desc[0] for desc in cursor.description]
                 logger.debug(f"FTS Test: DB query OK, {len(db_results_raw)} rows fetched.")
+            else: # Should not happen if query executes, but good for robustness
+                logger.warning(f"FTS Test: db_results_raw is None after query execution for '{final_query_string_for_fts}'.")
+                db_results_raw = [] # Ensure it's an empty list
     except Exception as e:
         logger.error(f"FTS Test: DB error for query string '{final_query_string_for_fts}': {e}", exc_info=True)
         sentry_sdk.capture_exception(e)
         return jsonify({"error": "Database query failed"}), 500
 
-    if not db_results_raw:
+    if not db_results_raw: # Handles both None and empty list from fetchall
         logger.info(f"FTS Test: No DB results for query string '{final_query_string_for_fts}'")
+        if redis_conn: # Try to cache empty results
+            try:
+                redis_conn.setex(cache_key, 60 * 15, json.dumps([])) # Cache empty for 15 mins
+            except Exception as e:
+                logger.error(f"FTS Test: Redis SETEX error for empty key {cache_key}: {e}")
         return jsonify([])
     
-    db_results = [dict(row) for row in db_results_raw]
-    restaurant_dict_fts = {} # Use a different variable name
+    db_results = [dict(row) for row in db_results_raw] # Convert DictRow to dict
+    restaurant_dict_fts = {}
     # Result processing logic - same as before
     for row_dict in db_results:
         camis = row_dict.get('camis')
@@ -298,11 +301,10 @@ def search_fts_test():
             redis_conn.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
             logger.info(f"FTS Test: Stored result in cache for key: {cache_key}")
         except Exception as e:
-            logger.error(f"FTS Test: Redis SETEX error for key {cache_key}: {e}"); sentry_sdk.capture_exception(e)
+            logger.error(f"FTS Test: Redis SETEX error for key {cache_key}: {e}")
+            sentry_sdk.capture_exception(e)
     return jsonify(formatted_results)
 
-# --- Other Routes (/recent, /test-db-connection, /trigger-update) ---
-# These are copied from the version the user uploaded, assuming they are stable/correct.
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
     logger.info("Received request for /recent")
