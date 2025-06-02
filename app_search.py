@@ -206,7 +206,7 @@ def search_fts_test():
         logger.warning("/search_fts_test: Search term is empty, returning 400.")
         return jsonify({"error": "Search term is empty"}), 400
 
-    normalized_user_input = normalize_text(search_term_from_user)
+   normalized_user_input = normalize_search_term_for_hybrid(search_term_from_user)
     logger.info(f"/search_fts_test: Python normalized input: '{normalized_user_input}'")
 
     if not normalized_user_input:
