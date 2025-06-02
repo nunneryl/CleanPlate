@@ -133,15 +133,15 @@ def search_original():
     cache_key = f"search_orig:{normalized_name_for_key}"
     CACHE_TTL_SECONDS = 3600 * 4
 
-    redis_conn = get_redis_client()
-    if redis_conn:
-        try:
-            cached_result_str = redis_conn.get(cache_key)
-            if cached_result_str:
-                return jsonify(json.loads(cached_result_str))
-        except Exception as e:
-             logger.error(f"Original Search Redis GET error for key {cache_key}: {e}")
-             sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
+    #redis_conn = get_redis_client()
+    #if redis_conn:
+    #    try:
+     #       cached_result_str = redis_conn.get(cache_key)
+      #      if cached_result_str:
+       #         return jsonify(json.loads(cached_result_str))
+        #except Exception as e:
+         #    logger.error(f"Original Search Redis GET error for key {cache_key}: {e}")
+          #   sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     
     name_with_periods, name_without_periods = original_sanitize_input(name)
     if '.' not in name and len(name_without_periods) >= 2: name_with_added_periods = '.'.join(list(name_without_periods))
@@ -190,9 +190,9 @@ def search_original():
             violation = {'violation_code': row_dict.get('violation_code'), 'violation_description': row_dict.get('violation_description')}
             if violation not in inspections[inspection_date_str]["violations"]: inspections[inspection_date_str]["violations"].append(violation)
     formatted_results = [dict(data, inspections=list(data['inspections'].values())) for data in restaurant_dict.values()]
-    if redis_conn:
-        try: redis_conn.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
-        except Exception as e: logger.error(f"Original Search Redis SETEX error: {e}"); sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
+    #if redis_conn:
+     #   try: redis_conn.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
+      #  except Exception as e: logger.error(f"Original Search Redis SETEX error: {e}"); sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     return jsonify(formatted_results)
 
 # --- NEW /search_fts_test ENDPOINT (Hybrid FTS + Trigram) ---
