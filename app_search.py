@@ -74,11 +74,20 @@ logger.info("Flask app created.")
 # --- AGGRESSIVE NORMALIZATION FUNCTION (Python-side, for FTS input) ---
 # This is the aggressive version we decided on.
 def normalize_text(text):
-    if not isinstance(text, str): return ''
+    if not isinstance(text, str):
+        return ''
     text = text.lower()
-    text = text.replace("'", "").replace(".", "").replace('&', 'and')
-    text = re.sub(r'[^\w\s]', '', text) # Remove non-alphanumeric but keep spaces temporarily
-    text = re.sub(r'\s+', '', text).strip() # Remove all spaces
+    # Convert apostrophes and periods to spaces first.
+    # This helps separate terms like "E.J.'s" into "e j s" before further processing.
+    # For "Xi'an", it becomes "xi an". For "Joe's", it becomes "joe s".
+    text = text.replace("'", " ").replace(".", " ")
+    text = text.replace('&', ' and ') # Replace ampersand with ' and '
+    
+    # Remove any characters that are not alphanumeric or whitespace
+    text = re.sub(r'[^\w\s]', '', text)
+    
+    # Collapse multiple spaces into a single space and strip leading/trailing whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
     return text
 
 # --- ORIGINAL SANITIZE INPUT (For the old /search endpoint) ---

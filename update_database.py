@@ -38,22 +38,22 @@ if not logger.hasHandlers():
 
 # --- AGGRESSIVE NORMALIZATION FUNCTION ---
 def normalize_text(text):
-    """
-    Aggressively normalizes text for FTS by lowercasing, removing specific punctuation
-    and all spaces to create a single tokenizable string.
-    """
     if not isinstance(text, str):
-        return '' # Return empty string for non-string input
+        return ''
     text = text.lower()
-    # Replace apostrophes, periods with nothing (remove them entirely)
-    # Replace ampersand with 'and' (though spaces will be removed later, this can help if 'and' is a stopword)
-    text = text.replace("'", "").replace(".", "").replace('&', 'and')
-    # Remove all other non-alphanumeric characters (except spaces initially, to separate words before joining)
+    # Convert apostrophes and periods to spaces first.
+    # This helps separate terms like "E.J.'s" into "e j s" before further processing.
+    # For "Xi'an", it becomes "xi an". For "Joe's", it becomes "joe s".
+    text = text.replace("'", " ").replace(".", " ")
+    text = text.replace('&', ' and ') # Replace ampersand with ' and '
+    
+    # Remove any characters that are not alphanumeric or whitespace
     text = re.sub(r'[^\w\s]', '', text)
-    # NOW, remove all spaces to join words into a single string for FTS
-    # This helps create more predictable tokens for prefix matching against the single string.
-    text = re.sub(r'\s+', '', text).strip()
+    
+    # Collapse multiple spaces into a single space and strip leading/trailing whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
     return text
+    
 # --- END AGGRESSIVE NORMALIZATION FUNCTION ---
 
 def print_debug(message):
