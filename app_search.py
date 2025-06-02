@@ -198,123 +198,108 @@ def search_original():
 # --- NEW /search_fts_test ENDPOINT (Hybrid FTS + Trigram) ---
 @app.route('/search_fts_test', methods=['GET'])
 def search_fts_test():
-    logger.info("Received request for HYBRID /search_fts_test endpoint")
+    logger.info("---- /search_fts_test: Request received ----")
     search_term_from_user = request.args.get('name', '').strip()
+    logger.info(f"/search_fts_test: Raw search term from user: '{search_term_from_user}'")
+
     if not search_term_from_user:
+        logger.warning("/search_fts_test: Search term is empty, returning 400.")
         return jsonify({"error": "Search term is empty"}), 400
 
-    # Normalize user input using the Python function that mirrors SQL normalize_dba()
-    normalized_query_for_pg = normalize_search_term_for_hybrid(search_term_from_user)
-    if not normalized_query_for_pg:
+    normalized_user_input = normalize_text(search_term_from_user)
+    logger.info(f"/search_fts_test: Python normalized input: '{normalized_user_input}'")
+
+    if not normalized_user_input:
+        logger.info(f"/search_fts_test: Normalized input is empty, returning empty list.")
         return jsonify([])
 
-    # Cache key based on this normalized input
-    cache_key = f"search_hybrid_v1:{normalized_query_for_pg}"
-    CACHE_TTL_SECONDS = 3600 * 1 # 1 hour cache for testing
+    # Explicit prefixing for to_tsquery, as websearch_to_tsquery wasn't giving prefix match
+    # on single terms like 'xian' against 'xianfamousfood'
+    # This logic was from our successful "explicit prefix" attempt.
+    query_terms = normalized_user_input.split() # Should be just one term after aggressive normalization
+    if len(query_terms) == 1 and query_terms[0]:
+        fts_query_string = query_terms[0] + ":*"
+    elif len(query_terms) > 1: # Should not happen with current aggressive normalize_text
+        fts_query_string = ' & '.join([term + ":*" for term in query_terms])
+    else:
+        logger.warning(f"/search_fts_test: normalized_user_input ('{normalized_user_input}') resulted in no query_terms for FTS string.")
+        return jsonify([])
+        
+    logger.info(f"/search_fts_test: Final FTS query string for to_tsquery: '{fts_query_string}'")
 
-    redis_conn = get_redis_client()
-    if redis_conn:
-        try:
-            cached_result_str = redis_conn.get(cache_key)
-            if cached_result_str:
-                logger.info(f"Hybrid Search Test: Cache hit for key: {cache_key}")
-                return jsonify(json.loads(cached_result_str))
-        except Exception as e:
-             logger.error(f"Hybrid Search Test: Redis GET error for key {cache_key}: {e}")
-             sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
-    
-    # Hybrid Query combining FTS and Trigram, based on research document Section 6.6
-    # The user's input (normalized_query_for_pg) is passed as a parameter once
-    # and referenced within the SQL query using a CTE or directly.
-    # For simplicity here, we pass it multiple times as needed by the query structure.
-    
-    # The 'public.restaurant_search_config' is your custom FTS config
-    # Thresholds for similarity are examples from the document (0.4, 0.3) and may need tuning.
+    # Cache is still temporarily disabled for this endpoint for debugging from previous step
+    # We will re-enable it once this is working.
+    # cache_key = f"search_v_debug_fts_test:{fts_query_string}"
+    # logger.info(f"/search_fts_test: Cache key: {cache_key}")
+    # ... (Redis GET logic would be here) ...
+
     query = """
-    WITH user_input AS (
-        SELECT %s AS normalized_query -- Parameter for the Python-normalized search term
-    )
-    SELECT
-        r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
-        r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
-        r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description,
-        -- FTS Rank (higher is better), using normalization option 32 for 0-1 scale
-        ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.normalized_query), 32) AS fts_score,
-        -- Trigram Word Similarity (higher is better, 0 to 1)
-        word_similarity(ui.normalized_query, r.dba_normalized_search) AS trgm_word_similarity,
-        -- General Trigram Similarity (higher is better, 0 to 1)
-        similarity(r.dba_normalized_search, ui.normalized_query) AS trgm_direct_similarity
-    FROM
-        restaurants r
-        JOIN user_input ui ON TRUE -- Make normalized_query available
+        SELECT
+            r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
+            r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
+            r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description,
+            ts_rank_cd(r.dba_tsv, to_tsquery('english', %s)) AS rank
+        FROM restaurants r
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-    WHERE
-        -- FTS condition
-        (r.dba_tsv @@ websearch_to_tsquery('public.restaurant_search_config', ui.normalized_query))
-        OR
-        -- Trigram condition (using word_similarity for partial matches)
-        (word_similarity(ui.normalized_query, r.dba_normalized_search) > 0.4) -- Threshold from doc
-        OR
-        -- Broader trigram similarity for general typos
-        (similarity(r.dba_normalized_search, ui.normalized_query) > 0.3) -- Threshold from doc
-    ORDER BY
-        -- Weighted sum of scores (weights are examples and need tuning)
-        (ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.normalized_query), 32) * 1.0) +
-        (word_similarity(ui.normalized_query, r.dba_normalized_search) * 0.8) +
-        (similarity(r.dba_normalized_search, ui.normalized_query) * 0.5) DESC,
-        r.dba ASC, -- Secondary sort for tie-breaking
-        r.inspection_date DESC
-    LIMIT 50; -- Limit results
+        WHERE r.dba_tsv @@ to_tsquery('english', %s) -- Using to_tsquery with explicit prefix
+        ORDER BY rank DESC, r.dba ASC, r.inspection_date DESC
+        LIMIT 100;
     """
-    params = (normalized_query_for_pg,) # Single parameter for the CTE
+    params = (fts_query_string, fts_query_string)
+    logger.info(f"/search_fts_test: SQL Query = {query}")
+    logger.info(f"/search_fts_test: SQL Params = {params}")
 
-    db_results_raw = None; columns_hybrid = []
+    db_results_raw = None
+    columns_fts = []
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            logger.debug(f"Hybrid Search Test: Executing query with normalized input: '{normalized_query_for_pg}'")
             cursor.execute(query, params)
             db_results_raw = cursor.fetchall()
             if db_results_raw is not None:
-                columns_hybrid = [desc[0] for desc in cursor.description]
-                logger.debug(f"Hybrid Search Test: DB query OK, {len(db_results_raw)} rows fetched.")
+                columns_fts = [desc[0] for desc in cursor.description]
+                logger.info(f"/search_fts_test: DB query executed. Number of raw rows fetched: {len(db_results_raw)}")
+                if len(db_results_raw) > 0:
+                    logger.debug(f"/search_fts_test: First raw row sample: {dict(db_results_raw[0]) if db_results_raw else 'No rows'}")
+            else:
+                logger.warning("/search_fts_test: db_results_raw is None after query execution.")
+                db_results_raw = []
     except Exception as e:
-        logger.error(f"Hybrid Search Test: DB error for normalized input '{normalized_query_for_pg}': {e}", exc_info=True)
+        logger.error(f"/search_fts_test: DB error for FTS query string '{fts_query_string}': {e}", exc_info=True)
         sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
         return jsonify({"error": "Database query failed"}), 500
 
     if not db_results_raw:
-        logger.info(f"Hybrid Search Test: No DB results for normalized input '{normalized_query_for_pg}'")
+        logger.info(f"/search_fts_test: No DB results for FTS query string '{fts_query_string}', returning empty list.")
+        # ... (Redis SETEX for empty result would be here if cache was active) ...
         return jsonify([])
     
+    logger.info(f"/search_fts_test: Starting processing of {len(db_results_raw)} raw rows.")
     db_results = [dict(row) for row in db_results_raw]
-    restaurant_dict_hybrid = {}
-    for row_dict in db_results: # Result processing
+    restaurant_dict_fts = {}
+    for row_dict in db_results:
         camis = row_dict.get('camis')
-        if not camis: continue
-        if camis not in restaurant_dict_hybrid:
-            # Exclude FTS/Trigram scores from main object if not needed by frontend
-            restaurant_dict_hybrid[camis] = {k: v for k, v in row_dict.items() if k not in ['fts_score', 'trgm_word_similarity', 'trgm_direct_similarity', 'violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
-            restaurant_dict_hybrid[camis]['inspections'] = {}
+        if not camis:
+            logger.warning("/search_fts_test: Row found with no CAMIS in DB results, skipping.")
+            continue
+        if camis not in restaurant_dict_fts:
+            restaurant_dict_fts[camis] = {k: v for k, v in row_dict.items() if k not in ['rank', 'violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
+            restaurant_dict_fts[camis]['inspections'] = {}
+        
         inspection_date_obj = row_dict.get('inspection_date')
         if inspection_date_obj:
             inspection_date_str = inspection_date_obj.isoformat()
-            if inspection_date_str not in restaurant_dict_hybrid[camis]['inspections']:
-                restaurant_dict_hybrid[camis]['inspections'][inspection_date_str] = {'inspection_date': inspection_date_str, 'critical_flag': row_dict.get('critical_flag'), 'grade': row_dict.get('grade'), 'inspection_type': row_dict.get('inspection_type'), 'violations': []}
+            if inspection_date_str not in restaurant_dict_fts[camis]['inspections']:
+                restaurant_dict_fts[camis]['inspections'][inspection_date_str] = {'inspection_date': inspection_date_str, 'critical_flag': row_dict.get('critical_flag'), 'grade': row_dict.get('grade'), 'inspection_type': row_dict.get('inspection_type'), 'violations': []}
             if row_dict.get('violation_code'):
                 violation = {'violation_code': row_dict.get('violation_code'), 'violation_description': row_dict.get('violation_description')}
-                if violation not in restaurant_dict_hybrid[camis]['inspections'][inspection_date_str]['violations']:
-                    restaurant_dict_hybrid[camis]['inspections'][inspection_date_str]['violations'].append(violation)
-    formatted_results = [dict(data, inspections=list(data['inspections'].values())) for data in restaurant_dict_hybrid.values()]
-
-    if redis_conn:
-        try:
-            redis_conn.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
-            logger.info(f"Hybrid Search Test: Stored result in cache for key: {cache_key}")
-        except Exception as e:
-            logger.error(f"Hybrid Search Test: Redis SETEX error for key {cache_key}: {e}")
-            sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
+                if violation not in restaurant_dict_fts[camis]['inspections'][inspection_date_str]['violations']:
+                    restaurant_dict_fts[camis]['inspections'][inspection_date_str]['violations'].append(violation)
+    
+    formatted_results = [dict(data, inspections=list(data['inspections'].values())) for data in restaurant_dict_fts.values()]
+    logger.info(f"/search_fts_test: Processed results. Final count: {len(formatted_results)}")
+    # ... (Redis SETEX for successful result would be here if cache was active) ...
     return jsonify(formatted_results)
-
+    
 # --- Other Routes (/recent, /test-db-connection, /trigger-update from user's uploaded file) ---
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
