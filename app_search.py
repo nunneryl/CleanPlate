@@ -73,11 +73,15 @@ logger.info("Flask app created.")
 
 # --- PYTHON NORMALIZATION FUNCTION (to mirror SQL normalize_dba) ---
 def normalize_search_term_for_hybrid(text):
+    """
+    Canonical normalization function to match the database's normalize_dba() behavior.
+    This version keeps spaces for punctuation to separate terms like "Xi'an" into "xi an".
+    """
     if not isinstance(text, str):
         return ''
     
+    # Lowercase and handle common substitutions
     normalized_text = text.lower()
-    
     accent_map = {
         'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a',
         'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o',
@@ -86,11 +90,15 @@ def normalize_search_term_for_hybrid(text):
     for accented, unaccented in accent_map.items():
         normalized_text = normalized_text.replace(accented, unaccented)
     
-    normalized_text = re.sub(r"'s\b|s'\b", "", normalized_text, flags=re.IGNORECASE)
-    normalized_text = re.sub(r"[-/]", " ", normalized_text)
+    # Replace key punctuation with spaces INSTEAD of removing them.
+    # This correctly tokenizes terms like "Xi'an" -> "xi an" and "E.J.'s" -> "e j s"
+    normalized_text = re.sub(r"['./-]", " ", normalized_text)
+    
+    # Remove any remaining characters that are not alphanumeric or whitespace
     normalized_text = re.sub(r"[^a-z0-9\s]", "", normalized_text)
-    normalized_text = re.sub(r"\s+", " ", normalized_text)
-    normalized_text = normalized_text.strip()
+    
+    # Collapse multiple spaces into one and strip whitespace
+    normalized_text = re.sub(r"\s+", " ", normalized_text).strip()
     
     return normalized_text
 
@@ -194,17 +202,28 @@ def search_fts_test():
         logger.warning("/search_fts_test: Search term is empty, returning 400.")
         return jsonify({"error": "Search term is empty"}), 400
 
-    # Use the Python function that mirrors SQL normalize_dba()
-    normalized_query_for_pg = normalize_search_term_for_hybrid(search_term_from_user)
-    logger.info(f"/search_fts_test: Python normalized input for PG: '{normalized_query_for_pg}'")
+    # Use the NEW, CORRECTED Python function that mirrors SQL normalize_dba()
+    normalized_for_pg = normalize_search_term_for_hybrid(search_term_from_user)
+    logger.info(f"/search_fts_test: Python normalized input for PG: '{normalized_for_pg}'")
     
-    if not normalized_query_for_pg:
-        logger.info(f"/search_fts_test: Normalized query for PG is empty, returning empty list.")
+    if not normalized_for_pg:
+        logger.info(f"/search_fts_test: Normalized query is empty, returning empty list.")
         return jsonify([])
 
-    # Cache key based on this normalized input
-    cache_key = f"search_hybrid_v1_dl:{normalized_query_for_pg}" # dl for detailed logging
-    CACHE_TTL_SECONDS = 3600 * 1 # 1 hour cache for testing
+    # --- START OF QUERY REFINEMENT ---
+    # Modify the normalized term for better FTS prefix matching.
+    # 'lunch' -> 'lunch:*', 'xi an' -> 'xi & an:*'
+    query_terms = normalized_for_pg.split()
+    if query_terms:
+        # Add the prefix operator to the last term
+        query_terms[-1] = query_terms[-1] + ':*'
+    # Join terms with '&' for websearch_to_tsquery, which handles 'AND' logic
+    fts_query_string = ' & '.join(query_terms)
+    logger.info(f"/search_fts_test: FTS-ready query string: '{fts_query_string}'")
+    # --- END OF QUERY REFINEMENT ---
+
+    cache_key = f"search_hybrid_v2_dl:{normalized_for_pg}" # v2 reflects new logic
+    CACHE_TTL_SECONDS = 3600 * 1
 
     # <<<< REDIS GET temporarily commented out for debugging >>>>
     # redis_conn = get_redis_client()
@@ -220,36 +239,34 @@ def search_fts_test():
     #          logger.error(f"/search_fts_test: Redis GET error for key {cache_key}: {e}")
     #          sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     
-    logger.info(f"/search_fts_test: Proceeding to DB query with normalized input: '{normalized_query_for_pg}'")
+    logger.info(f"/search_fts_test: Proceeding to DB query with normalized input: '{normalized_for_pg}' and FTS query: '{fts_query_string}'")
     
     query = """
     WITH user_input AS (
-        SELECT %s AS normalized_query 
+        SELECT 
+            %s AS normalized_query,
+            %s AS fts_query_string
     )
     SELECT
         r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
         r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
         r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description,
-        ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.normalized_query), 32) AS fts_score,
-        word_similarity(ui.normalized_query, r.dba_normalized_search) AS trgm_word_similarity,
-        similarity(r.dba_normalized_search, ui.normalized_query) AS trgm_direct_similarity
+        ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32) AS fts_score,
+        word_similarity(ui.normalized_query, r.dba_normalized_search) AS trgm_word_similarity
     FROM
         restaurants r
         JOIN user_input ui ON TRUE 
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
     WHERE
-        (r.dba_tsv @@ websearch_to_tsquery('public.restaurant_search_config', ui.normalized_query))
+        (r.dba_tsv @@ websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string))
         OR
-        (word_similarity(ui.normalized_query, r.dba_normalized_search) > 0.35) 
-        OR
-        (similarity(r.dba_normalized_search, ui.normalized_query) > 0.25) 
+        (word_similarity(ui.normalized_query, r.dba_normalized_search) > 0.3) -- Lowered threshold slightly
     ORDER BY
-        (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.normalized_query), 32), 0) * 1.0) +
-        (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 0.9) +
-        (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.6) DESC,
+        (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32), 0) * 1.2) + -- Increased FTS weight
+        (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 0.9) DESC,
         r.dba ASC, 
         r.inspection_date DESC
-    LIMIT 50; 
+    LIMIT 75; -- Increased limit slightly
     """
     params = (normalized_query_for_pg,)
     logger.info(f"/search_fts_test: SQL Query = {query}") # Log the query structure
