@@ -75,13 +75,18 @@ logger.info("Flask app created.")
 def normalize_search_term_for_hybrid(text):
     """
     Canonical normalization function to match the database's normalize_dba() behavior.
-    This version keeps spaces for punctuation to separate terms like "Xi'an" into "xi an".
+    This version handles ampersands, punctuation, and accents.
     """
     if not isinstance(text, str):
         return ''
     
     # Lowercase and handle common substitutions
     normalized_text = text.lower()
+    
+    # --- START: ADDED AMPERSAND HANDLING ---
+    normalized_text = normalized_text.replace('&', ' and ')
+    # --- END: ADDED AMPERSAND HANDLING ---
+
     accent_map = {
         'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a',
         'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o',
@@ -91,7 +96,6 @@ def normalize_search_term_for_hybrid(text):
         normalized_text = normalized_text.replace(accented, unaccented)
     
     # Replace key punctuation with spaces INSTEAD of removing them.
-    # This correctly tokenizes terms like "Xi'an" -> "xi an" and "E.J.'s" -> "e j s"
     normalized_text = re.sub(r"['./-]", " ", normalized_text)
     
     # Remove any remaining characters that are not alphanumeric or whitespace
@@ -101,7 +105,6 @@ def normalize_search_term_for_hybrid(text):
     normalized_text = re.sub(r"\s+", " ", normalized_text).strip()
     
     return normalized_text
-
 # --- ORIGINAL SANITIZE INPUT (For the old /search endpoint, from user's file) ---
 def original_sanitize_input(input_str):
     if not input_str: return "", ""
