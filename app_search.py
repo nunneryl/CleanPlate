@@ -1,4 +1,4 @@
-# app_search.py - Final Production Version with Synonym Map and Caching
+# app_search.py - Final Production Version with Corrected Query Construction
 
 # Standard library imports
 import os
@@ -67,7 +67,6 @@ logger = logging.getLogger(__name__)
 logger.info("Logging configured.")
 
 # --- Foundational Synonym Map ---
-# Generated from data analysis of the DOHMH dataset to handle common lexical variations.
 SEARCH_TERM_SYNONYMS = {
     'pjclarkes': 'p j clarkes', 'sbarros': 's barros', 'bxdrafthouse': 'b x drafthouse',
     'foolsgrind': 'fools grind', 'mghotelenotecas': 'm g hotel enotecas', 'dandj': 'd and j',
@@ -120,12 +119,7 @@ logger.info("Flask app created.")
 
 # --- Canonical Normalization Function ---
 def normalize_search_term_for_hybrid(text):
-    """
-    Canonical normalization function to match the database's normalize_dba() behavior.
-    This version handles ampersands, punctuation, and accents.
-    """
-    if not isinstance(text, str):
-        return ''
+    if not isinstance(text, str): return ''
     normalized_text = text.lower()
     normalized_text = normalized_text.replace('&', ' and ')
     accent_map = {
@@ -158,11 +152,10 @@ def root():
 # --- ORIGINAL /search ENDPOINT (for live app stability) ---
 @app.route('/search', methods=['GET'])
 def search_original():
-    # This function remains unchanged to ensure the stability of the old endpoint.
+    # This function remains unchanged.
     logger.info("Received request for ORIGINAL /search endpoint")
     name = request.args.get('name', '').strip()
-    if not name:
-        return jsonify({"error": "Search term is empty"}), 400
+    if not name: return jsonify({"error": "Search term is empty"}), 400
     normalized_name_for_key = name.replace("’", "'").replace("‘", "'").lower().strip()
     cache_key = f"search_orig:{normalized_name_for_key}"
     CACHE_TTL_SECONDS = 3600 * 4
@@ -235,7 +228,6 @@ def search_fts_test():
 
     normalized_for_pg = normalize_search_term_for_hybrid(search_term_from_user)
     
-    # --- Use the synonym map for known variations ---
     if normalized_for_pg in SEARCH_TERM_SYNONYMS:
         original_term = normalized_for_pg
         normalized_for_pg = SEARCH_TERM_SYNONYMS[original_term]
@@ -244,9 +236,8 @@ def search_fts_test():
     if not normalized_for_pg:
         return jsonify([])
 
-    # --- Caching logic is now ACTIVE ---
     cache_key = f"search_hybrid_prod_v1:{normalized_for_pg}"
-    CACHE_TTL_SECONDS = 3600 * 4 # Cache for 4 hours
+    CACHE_TTL_SECONDS = 3600 * 4
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -259,11 +250,11 @@ def search_fts_test():
              logger.error(f"/search_fts_test: Redis GET error for key {cache_key}: {e}")
              sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     
-    # --- FTS Query String Preparation ---
+    # --- CORRECTED FTS Query String Preparation ---
     query_terms = normalized_for_pg.split()
     if query_terms:
         query_terms[-1] = query_terms[-1] + ':*'
-    fts_query_string = ' & '.join(query_terms)
+    fts_query_string = ' '.join(query_terms) # CORRECTED: Use space, not '&'
     logger.info(f"/search_fts_test: FTS-ready query string: '{fts_query_string}'")
     
     query = """
@@ -310,7 +301,6 @@ def search_fts_test():
         logger.info(f"/search_fts_test: No DB results for normalized input '{normalized_for_pg}', returning empty list.")
         return jsonify([])
     
-    # --- Result Formatting ---
     db_results = [dict(row) for row in db_results_raw]
     restaurant_dict_hybrid = {}
     for row_dict in db_results:
@@ -331,7 +321,6 @@ def search_fts_test():
     
     formatted_results = [dict(data, inspections=list(data['inspections'].values())) for data in restaurant_dict_hybrid.values()]
 
-    # --- Storing result in cache ---
     if redis_conn:
         try:
             redis_conn.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
@@ -343,14 +332,12 @@ def search_fts_test():
     return jsonify(formatted_results)
 
 # --- Other Routes (/recent, /test-db-connection, /trigger-update) ---
-# These functions remain unchanged.
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
     logger.info("Received request for /recent")
     days = request.args.get('days', '7');
     try: days = int(days); days = 7 if days <= 0 else days
     except ValueError: days = 7
-    logger.info(f"Fetching recent restaurants (graded A/B/C) from past {days} days.")
     query = """ SELECT DISTINCT ON (r.camis) r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone, r.latitude, r.longitude, r.grade, r.inspection_date, r.cuisine_description FROM restaurants r WHERE r.grade IN ('A', 'B', 'C') AND r.inspection_date >= (CURRENT_DATE - INTERVAL '%s days') ORDER BY r.camis, r.inspection_date DESC LIMIT 50 """
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
