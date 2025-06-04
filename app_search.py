@@ -191,7 +191,7 @@ def search_original():
         except Exception as e: logger.error(f"Original Search Redis SETEX error: {e}"); sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     return jsonify(formatted_results)
 
-# --- /search_fts_test ENDPOINT (Hybrid FTS + Trigram with Detailed Logging) ---
+# --- /search_fts_test ENDPOINT (Hybrid FTS + Trigram with Detailed Logging & Refined Logic) ---
 @app.route('/search_fts_test', methods=['GET'])
 def search_fts_test():
     logger.info("---- /search_fts_test: Request received ----")
@@ -268,16 +268,17 @@ def search_fts_test():
         r.inspection_date DESC
     LIMIT 75; -- Increased limit slightly
     """
-    params = (normalized_query_for_pg,)
-    logger.info(f"/search_fts_test: SQL Query = {query}") # Log the query structure
-    logger.info(f"/search_fts_test: SQL Params = {params}") # Log the params
+    # THIS IS THE CORRECTED LINE:
+    params = (normalized_for_pg, fts_query_string)
+    
+    logger.info(f"/search_fts_test: SQL Query = {query}")
+    logger.info(f"/search_fts_test: SQL Params = {params}")
 
     db_results_raw = None; columns_hybrid = []
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute(query, params)
             db_results_raw = cursor.fetchall()
-            # <<<< DETAILED LOGGING FOR RAW DB RESULTS >>>>
             if db_results_raw is not None:
                 logger.info(f"/search_fts_test: RAW DB RESULTS COUNT: {len(db_results_raw)}")
                 if len(db_results_raw) > 0:
@@ -287,12 +288,12 @@ def search_fts_test():
                 logger.warning("/search_fts_test: db_results_raw is None after query execution.")
                 db_results_raw = []
     except Exception as e:
-        logger.error(f"/search_fts_test: DB error for normalized input '{normalized_query_for_pg}': {e}", exc_info=True)
+        logger.error(f"/search_fts_test: DB error for normalized input '{normalized_for_pg}': {e}", exc_info=True)
         sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
         return jsonify({"error": "Database query failed"}), 500
 
     if not db_results_raw:
-        logger.info(f"/search_fts_test: No DB results for normalized input '{normalized_query_for_pg}', returning empty list.")
+        logger.info(f"/search_fts_test: No DB results for normalized input '{normalized_for_pg}', returning empty list.")
         return jsonify([])
     
     db_results = [dict(row) for row in db_results_raw]
@@ -303,7 +304,7 @@ def search_fts_test():
             logger.warning("/search_fts_test: Row found with no CAMIS in DB results, skipping.")
             continue
         if camis not in restaurant_dict_hybrid:
-            restaurant_dict_hybrid[camis] = {k: v for k, v in row_dict.items() if k not in ['fts_score', 'trgm_word_similarity', 'trgm_direct_similarity', 'violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
+            restaurant_dict_hybrid[camis] = {k: v for k, v in row_dict.items() if k not in ['fts_score', 'trgm_word_similarity', 'violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
             restaurant_dict_hybrid[camis]['inspections'] = {}
         inspection_date_obj = row_dict.get('inspection_date')
         if inspection_date_obj:
@@ -316,7 +317,6 @@ def search_fts_test():
                     restaurant_dict_hybrid[camis]['inspections'][inspection_date_str]['violations'].append(violation)
     
     formatted_results = [dict(data, inspections=list(data['inspections'].values())) for data in restaurant_dict_hybrid.values()]
-    # <<<< DETAILED LOGGING FOR FINAL FORMATTED RESULTS >>>>
     logger.info(f"/search_fts_test: FINAL FORMATTED RESULTS COUNT: {len(formatted_results)}")
     if formatted_results and len(formatted_results) > 0:
         logger.info(f"/search_fts_test: First formatted result sample: {formatted_results[0]}")
