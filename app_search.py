@@ -1,4 +1,4 @@
-# app_search.py - Hybrid FTS + Trigram for /search_fts_test, Redis Active
+# app_search.py - Hybrid FTS + Trigram for /search_fts_test with Detailed Logging
 
 # Standard library imports
 import os
@@ -30,7 +30,7 @@ except ImportError:
     def get_redis_client(): return None
 
 try:
-    from config import APIConfig, SentryConfig # As per user's last uploaded app_search.py
+    from config import APIConfig, SentryConfig
     logging.info("Imported config successfully.")
 except ImportError:
     logging.critical("FAILED to import config. Using placeholder classes.")
@@ -183,33 +183,44 @@ def search_original():
         except Exception as e: logger.error(f"Original Search Redis SETEX error: {e}"); sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     return jsonify(formatted_results)
 
-# --- /search_fts_test ENDPOINT (Hybrid FTS + Trigram, Redis Active) ---
+# --- /search_fts_test ENDPOINT (Hybrid FTS + Trigram with Detailed Logging) ---
 @app.route('/search_fts_test', methods=['GET'])
 def search_fts_test():
-    logger.info("Received request for HYBRID /search_fts_test endpoint")
+    logger.info("---- /search_fts_test: Request received ----")
     search_term_from_user = request.args.get('name', '').strip()
+    logger.info(f"/search_fts_test: Raw search term from user: '{search_term_from_user}'")
+
     if not search_term_from_user:
+        logger.warning("/search_fts_test: Search term is empty, returning 400.")
         return jsonify({"error": "Search term is empty"}), 400
 
+    # Use the Python function that mirrors SQL normalize_dba()
     normalized_query_for_pg = normalize_search_term_for_hybrid(search_term_from_user)
+    logger.info(f"/search_fts_test: Python normalized input for PG: '{normalized_query_for_pg}'")
+    
     if not normalized_query_for_pg:
+        logger.info(f"/search_fts_test: Normalized query for PG is empty, returning empty list.")
         return jsonify([])
 
-    cache_key = f"search_hybrid_v1:{normalized_query_for_pg}"
+    # Cache key based on this normalized input
+    cache_key = f"search_hybrid_v1_dl:{normalized_query_for_pg}" # dl for detailed logging
     CACHE_TTL_SECONDS = 3600 * 1 # 1 hour cache for testing
 
-    redis_conn = get_redis_client()
-    if redis_conn:
-        try:
-            cached_result_str = redis_conn.get(cache_key)
-            if cached_result_str:
-                logger.info(f"Hybrid Search Test: Cache hit for key: {cache__key}") # Corrected typo cache_key
-                return jsonify(json.loads(cached_result_str))
-            else:
-                logger.info(f"Hybrid Search Test: Cache miss for key: {cache_key}")
-        except Exception as e:
-             logger.error(f"Hybrid Search Test: Redis GET error for key {cache_key}: {e}")
-             sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
+    # <<<< REDIS GET temporarily commented out for debugging >>>>
+    # redis_conn = get_redis_client()
+    # if redis_conn:
+    #     try:
+    #         cached_result_str = redis_conn.get(cache_key)
+    #         if cached_result_str:
+    #             logger.info(f"/search_fts_test: Cache hit for key: {cache_key}")
+    #             return jsonify(json.loads(cached_result_str))
+    #         else:
+    #             logger.info(f"/search_fts_test: Cache miss for key: {cache_key}")
+    #     except Exception as e:
+    #          logger.error(f"/search_fts_test: Redis GET error for key {cache_key}: {e}")
+    #          sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
+    
+    logger.info(f"/search_fts_test: Proceeding to DB query with normalized input: '{normalized_query_for_pg}'")
     
     query = """
     WITH user_input AS (
@@ -229,44 +240,51 @@ def search_fts_test():
     WHERE
         (r.dba_tsv @@ websearch_to_tsquery('public.restaurant_search_config', ui.normalized_query))
         OR
-        (word_similarity(ui.normalized_query, r.dba_normalized_search) > 0.35) -- Adjusted threshold slightly
+        (word_similarity(ui.normalized_query, r.dba_normalized_search) > 0.35) 
         OR
-        (similarity(r.dba_normalized_search, ui.normalized_query) > 0.25) -- Adjusted threshold slightly
+        (similarity(r.dba_normalized_search, ui.normalized_query) > 0.25) 
     ORDER BY
         (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.normalized_query), 32), 0) * 1.0) +
-        (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 0.9) + -- Increased weight for word_similarity
-        (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.6) DESC, -- Increased weight for similarity
+        (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 0.9) +
+        (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.6) DESC,
         r.dba ASC, 
         r.inspection_date DESC
     LIMIT 50; 
     """
     params = (normalized_query_for_pg,)
+    logger.info(f"/search_fts_test: SQL Query = {query}") # Log the query structure
+    logger.info(f"/search_fts_test: SQL Params = {params}") # Log the params
 
     db_results_raw = None; columns_hybrid = []
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            logger.debug(f"Hybrid Search Test: Executing query with normalized input: '{normalized_query_for_pg}'")
             cursor.execute(query, params)
             db_results_raw = cursor.fetchall()
+            # <<<< DETAILED LOGGING FOR RAW DB RESULTS >>>>
             if db_results_raw is not None:
+                logger.info(f"/search_fts_test: RAW DB RESULTS COUNT: {len(db_results_raw)}")
+                if len(db_results_raw) > 0:
+                    logger.info(f"/search_fts_test: First raw DB result sample: {dict(db_results_raw[0])}")
                 columns_hybrid = [desc[0] for desc in cursor.description]
+            else:
+                logger.warning("/search_fts_test: db_results_raw is None after query execution.")
+                db_results_raw = []
     except Exception as e:
-        logger.error(f"Hybrid Search Test: DB error for normalized input '{normalized_query_for_pg}': {e}", exc_info=True)
+        logger.error(f"/search_fts_test: DB error for normalized input '{normalized_query_for_pg}': {e}", exc_info=True)
         sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
         return jsonify({"error": "Database query failed"}), 500
 
     if not db_results_raw:
-        logger.info(f"Hybrid Search Test: No DB results for normalized input '{normalized_query_for_pg}'")
-        if redis_conn: # Cache empty results
-            try: redis_conn.setex(cache_key, 60 * 15, json.dumps([]))
-            except Exception as e: logger.error(f"Hybrid Search Test: Redis SETEX error for empty key {cache_key}: {e}")
+        logger.info(f"/search_fts_test: No DB results for normalized input '{normalized_query_for_pg}', returning empty list.")
         return jsonify([])
     
     db_results = [dict(row) for row in db_results_raw]
     restaurant_dict_hybrid = {}
     for row_dict in db_results:
         camis = row_dict.get('camis')
-        if not camis: continue
+        if not camis:
+            logger.warning("/search_fts_test: Row found with no CAMIS in DB results, skipping.")
+            continue
         if camis not in restaurant_dict_hybrid:
             restaurant_dict_hybrid[camis] = {k: v for k, v in row_dict.items() if k not in ['fts_score', 'trgm_word_similarity', 'trgm_direct_similarity', 'violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
             restaurant_dict_hybrid[camis]['inspections'] = {}
@@ -279,19 +297,26 @@ def search_fts_test():
                 violation = {'violation_code': row_dict.get('violation_code'), 'violation_description': row_dict.get('violation_description')}
                 if violation not in restaurant_dict_hybrid[camis]['inspections'][inspection_date_str]['violations']:
                     restaurant_dict_hybrid[camis]['inspections'][inspection_date_str]['violations'].append(violation)
+    
     formatted_results = [dict(data, inspections=list(data['inspections'].values())) for data in restaurant_dict_hybrid.values()]
-
-    if redis_conn:
-        try:
-            redis_conn.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
-        except Exception as e:
-            logger.error(f"Hybrid Search Test: Redis SETEX error for key {cache_key}: {e}")
-            sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
+    # <<<< DETAILED LOGGING FOR FINAL FORMATTED RESULTS >>>>
+    logger.info(f"/search_fts_test: FINAL FORMATTED RESULTS COUNT: {len(formatted_results)}")
+    if formatted_results and len(formatted_results) > 0:
+        logger.info(f"/search_fts_test: First formatted result sample: {formatted_results[0]}")
+    
+    # <<<< REDIS SETEX temporarily commented out for debugging >>>>
+    # if redis_conn:
+    #     try:
+    #         redis_conn.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
+    #         logger.info(f"/search_fts_test: Stored result in cache for key: {cache_key}")
+    #     except Exception as e:
+    #         logger.error(f"/search_fts_test: Redis SETEX error for key {cache_key}: {e}")
+    #         sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     return jsonify(formatted_results)
 
 # --- Other Routes (/recent, /test-db-connection, /trigger-update from user's uploaded file) ---
 @app.route('/recent', methods=['GET'])
-def recent_restaurants(): # From user's file
+def recent_restaurants():
     logger.info("Received request for /recent")
     days = request.args.get('days', '7');
     try: days = int(days); days = 7 if days <= 0 else days
@@ -304,10 +329,10 @@ def recent_restaurants(): # From user's file
             results = [dict(row) for row in results_raw]
             return jsonify(results)
     except psycopg2.Error as db_err: logger.error(f"Error fetching recent restaurants: {db_err}"); sentry_sdk.capture_exception(db_err) if SentryConfig.SENTRY_DSN else None; return jsonify({"error": "DB error"}), 500
-    except Exception as e: logger.error(f"Unexpected error fetching recent restaurants: {e}", exc_info=True); sentry_sdk.capture_exception(e) if Sentry_Config.SENTRY_DSN else None; return jsonify({"error": "Unexpected error"}), 500
+    except Exception as e: logger.error(f"Unexpected error fetching recent restaurants: {e}", exc_info=True); sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None; return jsonify({"error": "Unexpected error"}), 500
 
 @app.route('/test-db-connection', methods=['GET'])
-def test_db_connection(): # From user's file
+def test_db_connection():
     logger.info("Received request for /test-db-connection")
     try:
         with DatabaseConnection() as conn, conn.cursor() as cursor:
@@ -317,7 +342,7 @@ def test_db_connection(): # From user's file
     except Exception as e: return jsonify({"status": "error", "message": f"DB connection error: {str(e)}"}), 500
 
 @app.route('/trigger-update', methods=['POST'])
-def trigger_update(): # From user's file
+def trigger_update():
     logger.info("Received request for /trigger-update")
     try:
         if not update_logic_imported: return jsonify({"status": "error", "message": "Update logic unavailable."}), 500
