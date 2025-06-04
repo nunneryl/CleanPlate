@@ -202,7 +202,6 @@ def search_fts_test():
         logger.warning("/search_fts_test: Search term is empty, returning 400.")
         return jsonify({"error": "Search term is empty"}), 400
 
-    # Use the NEW, CORRECTED Python function that mirrors SQL normalize_dba()
     normalized_for_pg = normalize_search_term_for_hybrid(search_term_from_user)
     logger.info(f"/search_fts_test: Python normalized input for PG: '{normalized_for_pg}'")
     
@@ -210,20 +209,15 @@ def search_fts_test():
         logger.info(f"/search_fts_test: Normalized query is empty, returning empty list.")
         return jsonify([])
 
-    # --- START OF QUERY REFINEMENT ---
-    # Modify the normalized term for better FTS prefix matching.
-    # 'lunch' -> 'lunch:*', 'xi an' -> 'xi & an:*'
     query_terms = normalized_for_pg.split()
     if query_terms:
-        # Add the prefix operator to the last term
         query_terms[-1] = query_terms[-1] + ':*'
-    # Join terms with '&' for websearch_to_tsquery, which handles 'AND' logic
     fts_query_string = ' & '.join(query_terms)
     logger.info(f"/search_fts_test: FTS-ready query string: '{fts_query_string}'")
-    # --- END OF QUERY REFINEMENT ---
 
-    cache_key = f"search_hybrid_v2_dl:{normalized_for_pg}" # v2 reflects new logic
+    cache_key = f"search_hybrid_v3_dl:{normalized_for_pg}" # v3 reflects new logic
     CACHE_TTL_SECONDS = 3600 * 1
+
 
     # <<<< REDIS GET temporarily commented out for debugging >>>>
     # redis_conn = get_redis_client()
@@ -252,7 +246,8 @@ def search_fts_test():
         r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
         r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description,
         ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32) AS fts_score,
-        word_similarity(ui.normalized_query, r.dba_normalized_search) AS trgm_word_similarity
+        word_similarity(ui.normalized_query, r.dba_normalized_search) AS trgm_word_similarity,
+        similarity(r.dba_normalized_search, ui.normalized_query) AS trgm_direct_similarity
     FROM
         restaurants r
         JOIN user_input ui ON TRUE 
@@ -260,17 +255,18 @@ def search_fts_test():
     WHERE
         (r.dba_tsv @@ websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string))
         OR
-        (word_similarity(ui.normalized_query, r.dba_normalized_search) > 0.3) -- Lowered threshold slightly
+        (word_similarity(ui.normalized_query, r.dba_normalized_search) > 0.25) -- Adjusted threshold
+        OR
+        (similarity(r.dba_normalized_search, ui.normalized_query) > 0.22) -- Added back similarity() for broader matching
     ORDER BY
-        (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32), 0) * 1.2) + -- Increased FTS weight
-        (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 0.9) DESC,
+        (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32), 0) * 1.2) +
+        (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 0.9) +
+        (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.6) DESC, -- Added similarity to ranking
         r.dba ASC, 
         r.inspection_date DESC
-    LIMIT 75; -- Increased limit slightly
+    LIMIT 75;
     """
-    # THIS IS THE CORRECTED LINE:
     params = (normalized_for_pg, fts_query_string)
-    
     logger.info(f"/search_fts_test: SQL Query = {query}")
     logger.info(f"/search_fts_test: SQL Params = {params}")
 
@@ -304,7 +300,7 @@ def search_fts_test():
             logger.warning("/search_fts_test: Row found with no CAMIS in DB results, skipping.")
             continue
         if camis not in restaurant_dict_hybrid:
-            restaurant_dict_hybrid[camis] = {k: v for k, v in row_dict.items() if k not in ['fts_score', 'trgm_word_similarity', 'violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
+            restaurant_dict_hybrid[camis] = {k: v for k, v in row_dict.items() if k not in ['fts_score', 'trgm_word_similarity', 'trgm_direct_similarity', 'violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
             restaurant_dict_hybrid[camis]['inspections'] = {}
         inspection_date_obj = row_dict.get('inspection_date')
         if inspection_date_obj:
@@ -322,6 +318,7 @@ def search_fts_test():
         logger.info(f"/search_fts_test: First formatted result sample: {formatted_results[0]}")
     
     # <<<< REDIS SETEX temporarily commented out for debugging >>>>
+    # redis_conn = get_redis_client()
     # if redis_conn:
     #     try:
     #         redis_conn.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
@@ -330,6 +327,7 @@ def search_fts_test():
     #         logger.error(f"/search_fts_test: Redis SETEX error for key {cache_key}: {e}")
     #         sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     return jsonify(formatted_results)
+
 
 # --- Other Routes (/recent, /test-db-connection, /trigger-update from user's uploaded file) ---
 @app.route('/recent', methods=['GET'])
