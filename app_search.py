@@ -288,15 +288,9 @@ def search_fts_test():
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
     WHERE
         (r.dba_tsv @@ websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string))
-        OR
-        (word_similarity(ui.normalized_query, r.dba_normalized_search) > 0.25)
-        OR
-        (similarity(r.dba_normalized_search, ui.normalized_query) > 0.22)
     ORDER BY
-        (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32), 0) * 1.2) +
-        (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 0.9) +
-        (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.6) DESC,
-        r.dba ASC, 
+        ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32) DESC,
+        r.dba ASC,
         r.inspection_date DESC
     LIMIT 75;
     """
