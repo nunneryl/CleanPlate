@@ -311,10 +311,10 @@ def search_fts_test():
                     logger.info("/search_fts_test: Cursor created") # CHECKPOINT 3
                     
                     mogrified_query_str = "Error mogrifying query"
-                    try {
+                    try:
                         mogrified_query_str = cursor.mogrify(query, params).decode('utf-8')
                         logger.info(f"/search_fts_test: Mogrified query ready: {mogrified_query_str}") # CHECKPOINT 4
-                    } except Exception as mog_err:
+                    except Exception as mog_err:
                         logger.error(f"/search_fts_test: Error during mogrify: {mog_err}")
 
                     # logger.info(f"/search_fts_test: EXECUTING SQL: {mogrified_query_str}") # We'll use the simpler log below for now
