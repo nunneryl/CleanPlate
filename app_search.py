@@ -294,11 +294,11 @@ def search_fts_test():
         (similarity(r.dba_normalized_search, ui.normalized_query) > 0.22)
     ORDER BY
         (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32), 0) * 1.2) +
-        (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 0.9) +
-        (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.6) DESC,
+        (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 1.0) +
+        (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.2) DESC,
         r.dba ASC,
-        r.inspection_date DESC
-    LIMIT 75;
+        r.inspection_date DESC    
+        LIMIT 75;
     """
     params = (normalized_for_pg, fts_query_string)
     db_results_raw = None
