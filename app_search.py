@@ -295,7 +295,7 @@ def search_fts_test():
     LIMIT 75;
     """
     params = (normalized_for_pg, fts_query_string)
-  db_results_raw = None
+    db_results_raw = None
     logger.info("/search_fts_test: ABOUT TO TRY DATABASE QUERY BLOCK") # CHECKPOINT 1
 
     try:
