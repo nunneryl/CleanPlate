@@ -295,41 +295,60 @@ def search_fts_test():
     LIMIT 75;
     """
     params = (normalized_for_pg, fts_query_string)
-    db_results_raw = None
- # columns_hybrid = [] # Not needed if we log raw results directly
+  db_results_raw = None
+    logger.info("/search_fts_test: ABOUT TO TRY DATABASE QUERY BLOCK") # CHECKPOINT 1
+
     try:
-        with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            logger.info(f"/search_fts_test: EXECUTING SQL with FTS ONLY: {cursor.mogrify(query, params).decode('utf-8')}") # Log the exact query
-            cursor.execute(query, params)
-            db_results_raw = cursor.fetchall()
-
-            # --- START: NEW DETAILED LOGGING ---
-            if db_results_raw is not None:
-                logger.info(f"/search_fts_test: RAW DB RESULTS COUNT (FTS ONLY): {len(db_results_raw)}")
-                if len(db_results_raw) > 0:
-                    logger.info(f"/search_fts_test: --- START RAW DB RESULTS (FTS ONLY) ---")
-                    for i, row in enumerate(db_results_raw):
-                        # Log each row as a dictionary. Limit to first few rows if it's too much.
-                        if i < 5: # Log first 5 rows
-                            logger.info(f"/search_fts_test: Row {i}: {dict(row)}")
-                        else:
-                            break
-                    logger.info(f"/search_fts_test: --- END RAW DB RESULTS (FTS ONLY) ---")
-                    # You might also want to log the full list if it's short
-                    # logger.info(f"/search_fts_test: Full raw results: {[dict(r) for r in db_results_raw]}")
-                # columns_hybrid = [desc[0] for desc in cursor.description] # Keep if needed later
+        with DatabaseConnection() as conn:
+            logger.info("/search_fts_test: DatabaseConnection context entered") # CHECKPOINT 2
+            if conn is None:
+                logger.error("/search_fts_test: DB Connection is None, cannot proceed with cursor.")
+                # If conn is None, we can't create a cursor.
+                # This might happen if the placeholder DatabaseConnection is used due to an import error elsewhere.
+                # However, previous logs suggest imports are now okay.
             else:
-                logger.warning("/search_fts_test: db_results_raw is None after FTS ONLY query execution.")
-                db_results_raw = [] # Ensure it's an empty list if None
-            # --- END: NEW DETAILED LOGGING ---
+                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+                    logger.info("/search_fts_test: Cursor created") # CHECKPOINT 3
+                    
+                    mogrified_query_str = "Error mogrifying query"
+                    try {
+                        mogrified_query_str = cursor.mogrify(query, params).decode('utf-8')
+                        logger.info(f"/search_fts_test: Mogrified query ready: {mogrified_query_str}") # CHECKPOINT 4
+                    } except Exception as mog_err:
+                        logger.error(f"/search_fts_test: Error during mogrify: {mog_err}")
 
+                    # logger.info(f"/search_fts_test: EXECUTING SQL: {mogrified_query_str}") # We'll use the simpler log below for now
+                    
+                    cursor.execute(query, params)
+                    logger.info("/search_fts_test: Query executed") # CHECKPOINT 5
+                    
+                    db_results_raw = cursor.fetchall()
+                    logger.info("/search_fts_test: fetchall() completed") # CHECKPOINT 6
+
+                    # --- NEW DETAILED LOGGING ---
+                    if db_results_raw is not None:
+                        logger.info(f"/search_fts_test: RAW DB RESULTS COUNT: {len(db_results_raw)}")
+                        if len(db_results_raw) > 0:
+                            logger.info(f"/search_fts_test: --- START RAW DB RESULTS ---")
+                            for i, row_data in enumerate(db_results_raw):
+                                if i < 3: # Log first 3 rows
+                                    logger.info(f"/search_fts_test: Row {i}: {dict(row_data)}")
+                                else:
+                                    break
+                            logger.info(f"/search_fts_test: --- END RAW DB RESULTS ---")
+                        # columns_hybrid = [desc[0] for desc in cursor.description]
+                    else:
+                        logger.warning("/search_fts_test: db_results_raw is None after query execution.")
+                        db_results_raw = []
     except Exception as e:
-        logger.error(f"/search_fts_test: DB error (FTS ONLY) for normalized input '{normalized_for_pg}': {e}", exc_info=True)
+        logger.error(f"/search_fts_test: DB EXCEPTION BLOCK: {e}", exc_info=True) # CHECKPOINT 7
         sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
         return jsonify({"error": "Database query failed"}), 500
 
-    if not db_results_raw: # Check if it's an empty list now
-        logger.info(f"/search_fts_test: No DB results (FTS ONLY) for normalized input '{normalized_for_pg}', returning empty list.")
+    logger.info("/search_fts_test: AFTER DATABASE QUERY BLOCK") # CHECKPOINT 8
+
+    if not db_results_raw:
+        logger.info(f"/search_fts_test: No DB results, returning empty list.")
         return jsonify([])
     
     # --- Result Formatting ---
