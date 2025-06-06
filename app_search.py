@@ -273,7 +273,8 @@ def search_fts_test():
     
     query = """
     WITH user_input AS (
-        SELECT %s AS normalized_query, %s AS fts_query_string)
+        SELECT %s AS normalized_query, %s AS fts_query_string
+    )
     SELECT
         r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
         r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
@@ -292,13 +293,13 @@ def search_fts_test():
         OR
         (similarity(r.dba_normalized_search, ui.normalized_query) > 0.22)
     ORDER BY
-        -- START: NEW CASE STATEMENT FOR RANKING
         -- Prioritize results where the normalized name starts with the user's query
         CASE WHEN r.dba_normalized_search LIKE (ui.normalized_query || '%') THEN 0 ELSE 1 END ASC,
-        -- END: NEW CASE STATEMENT FOR RANKING
+        -- Then, rank by a composite score of FTS and Trigram similarities
         (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32), 0) * 1.2) +
         (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 1.0) +
         (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.2) DESC,
+        -- Finally, sort by name and date as tie-breakers
         r.dba ASC,
         r.inspection_date DESC
         LIMIT 75;
