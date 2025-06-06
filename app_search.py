@@ -1,4 +1,4 @@
-# app_search.py - DEBUG VERSION WITH REDIS CACHING DISABLED
+# app_search.py - Final Production Version
 
 # Standard library imports
 import os
@@ -16,7 +16,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import psycopg2
 import psycopg2.extras # For DictCursor
-# import redis # Redis import not strictly needed if get_redis_client handles it or if it's fully disabled
+import redis
 
 # Local application imports
 try:
@@ -149,34 +149,30 @@ def original_sanitize_input(input_str):
 def root():
     return jsonify({"status": "ok", "message": "API is running"})
 
-# --- ORIGINAL /search ENDPOINT (Cache Disabled for Debugging) ---
+# --- ORIGINAL /search ENDPOINT ---
 @app.route('/search', methods=['GET'])
 def search_original():
-    logger.info("Received request for ORIGINAL /search endpoint (CACHE DISABLED)")
+    logger.info("Received request for ORIGINAL /search endpoint")
     name = request.args.get('name', '').strip()
     if not name:
         return jsonify({"error": "Search term is empty"}), 400
-
-    # normalized_name_for_key = name.replace("’", "'").replace("‘", "'").lower().strip()
-    # cache_key = f"search_orig:{normalized_name_for_key}"
-    # CACHE_TTL_SECONDS = 3600 * 4
-
-    # redis_conn = get_redis_client()
-    # if redis_conn:
-    #     try:
-    #         cached_result_str = redis_conn.get(cache_key)
-    #         if cached_result_str:
-    #             logger.info(f"Cache hit for original search: '{name}'")
-    #             return jsonify(json.loads(cached_result_str))
-    #     except Exception as e:
-    #          logger.error(f"Original Search Redis GET error for key {cache_key}: {e}")
-    #          sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
-    
+    normalized_name_for_key = name.replace("’", "'").replace("‘", "'").lower().strip()
+    cache_key = f"search_orig:{normalized_name_for_key}"
+    CACHE_TTL_SECONDS = 3600 * 4
+    redis_conn = get_redis_client()
+    if redis_conn:
+        try:
+            cached_result_str = redis_conn.get(cache_key)
+            if cached_result_str:
+                logger.info(f"Cache hit for original search: '{name}'")
+                return jsonify(json.loads(cached_result_str))
+        except Exception as e:
+             logger.error(f"Original Search Redis GET error for key {cache_key}: {e}")
+             sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     name_with_periods, name_without_periods = original_sanitize_input(name)
     if '.' not in name and len(name_without_periods) >= 2: name_with_added_periods = '.'.join(list(name_without_periods))
     else: name_with_added_periods = name_with_periods
     transformed_name = name_with_periods.replace("s", "'s"); transformed_name_no_periods = name_without_periods.replace("s", "'s"); transformed_with_added_periods = name_with_added_periods.replace("s", "'s")
-    
     query = """
         SELECT r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone, 
                r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade, 
@@ -193,7 +189,6 @@ def search_original():
     where_params = [ f"%{p}%" for p in [name_with_periods, transformed_name, name_without_periods, transformed_name_no_periods, transformed_with_added_periods] ]
     order_params = [ name_with_periods, name_without_periods, f"{name_with_periods}%", f"{name_without_periods}%", f"{transformed_with_added_periods}%" ]
     params = where_params + order_params
-    
     db_results_raw = None; columns = []
     try:
         with DatabaseConnection() as conn, conn.cursor() as cursor:
@@ -204,7 +199,6 @@ def search_original():
         logger.error(f"Original Search DB error: {e}", exc_info=True)
         sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
         return jsonify({"error": "Database query failed"}), 500
-
     if not db_results_raw: return jsonify([])
     db_results = [dict(zip(columns, row)) for row in db_results_raw]
     restaurant_dict = {}
@@ -219,21 +213,15 @@ def search_original():
             violation = {'violation_code': row_dict.get('violation_code'), 'violation_description': row_dict.get('violation_description')}
             if violation not in inspections[inspection_date_str]["violations"]: inspections[inspection_date_str]["violations"].append(violation)
     formatted_results = [dict(data, inspections=list(data['inspections'].values())) for data in restaurant_dict.values()]
-    
-    # --- CACHE SET DISABLED FOR DEBUGGING ---
-    # redis_conn_for_set = get_redis_client() # Ensure redis_conn is defined if used here
-    # if redis_conn_for_set:
-    #     try:
-    #         redis_conn_for_set.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
-    #     except Exception as e:
-    #         logger.error(f"Original Search Redis SETEX error: {e}");
-    #         sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
+    if redis_conn:
+        try: redis_conn.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
+        except Exception as e: logger.error(f"Original Search Redis SETEX error: {e}"); sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     return jsonify(formatted_results)
 
-# --- /search_fts_test ENDPOINT (Cache Disabled for Debugging) ---
+# --- /search_fts_test ENDPOINT (PRODUCTION VERSION) ---
 @app.route('/search_fts_test', methods=['GET'])
 def search_fts_test():
-    logger.info("---- /search_fts_test: Request received (CACHE DISABLED) ----")
+    logger.info("---- /search_fts_test: Request received ----")
     search_term_from_user = request.args.get('name', '').strip()
     if not search_term_from_user:
         return jsonify({"error": "Search term is empty"}), 400
@@ -248,29 +236,27 @@ def search_fts_test():
     if not normalized_for_pg:
         return jsonify([])
 
-    # cache_key = f"search_hybrid_prod_v1:{normalized_for_pg}" # Not needed if cache is off
-    # CACHE_TTL_SECONDS = 3600 * 4 # Not needed if cache is off
+    # Caching is now re-enabled
+    cache_key = f"search_hybrid_prod_v1:{normalized_for_pg}"
+    CACHE_TTL_SECONDS = 3600 * 4 # Cache for 4 hours
+    redis_conn = get_redis_client()
+    if redis_conn:
+        try:
+            cached_result_str = redis_conn.get(cache_key)
+            if cached_result_str:
+                logger.info(f"/search_fts_test: Cache hit for key: {cache_key}")
+                return jsonify(json.loads(cached_result_str))
+            logger.info(f"/search_fts_test: Cache miss for key: {cache_key}")
+        except Exception as e:
+             logger.error(f"/search_fts_test: Redis GET error for key {cache_key}: {e}")
+             sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     
-    # --- CACHE GET DISABLED FOR DEBUGGING ---
-    # redis_conn = get_redis_client()
-    # if redis_conn:
-    #     try:
-    #         cached_result_str = redis_conn.get(cache_key)
-    #         if cached_result_str:
-    #             logger.info(f"/search_fts_test: Cache hit for key: {cache_key}")
-    #             return jsonify(json.loads(cached_result_str))
-    #         logger.info(f"/search_fts_test: Cache miss for key: {cache_key}")
-    #     except Exception as e:
-    #          logger.error(f"/search_fts_test: Redis GET error for key {cache_key}: {e}")
-    #          sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
-    
-    # --- FTS Query String Preparation ---
     query_terms = normalized_for_pg.split()
     if query_terms:
         query_terms[-1] = query_terms[-1] + ':*'
     fts_query_string = ' '.join(query_terms)
-    logger.info(f"/search_fts_test: FTS-ready query string: '{fts_query_string}'")
     
+    # --- THIS IS THE CORRECTED SQL QUERY ---
     query = """
     WITH user_input AS (
         SELECT %s AS normalized_query, %s AS fts_query_string
@@ -293,70 +279,33 @@ def search_fts_test():
         OR
         (similarity(r.dba_normalized_search, ui.normalized_query) > 0.22)
     ORDER BY
-        CASE WHEN r.dba_normalized_search LIKE (ui.normalized_query || '%') THEN 0 ELSE 1 END ASC,,
+        -- Prioritize results where the normalized name starts with the user's query
+        CASE WHEN r.dba_normalized_search LIKE (ui.normalized_query || '%') THEN 0 ELSE 1 END ASC,
+        -- Then, rank by a composite score of FTS and Trigram similarities
         (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32), 0) * 1.2) +
         (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 1.0) +
         (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.2) DESC,
+        -- Finally, sort by name and date as tie-breakers
         r.dba ASC,
         r.inspection_date DESC
-        LIMIT 75;
+    LIMIT 75;
     """
     
     params = (normalized_for_pg, fts_query_string)
     db_results_raw = None
-    print("SEARCH_FTS_TEST: ABOUT TO TRY DATABASE QUERY BLOCK", file=sys.stderr) # DEBUG PRINT
-    logger.error("SEARCH_FTS_TEST_ERROR_LEVEL: ABOUT TO TRY DB BLOCK") # DEBUG ERROR LOG
-
     try:
-        print("SEARCH_FTS_TEST: Inside main try block", file=sys.stderr) # DEBUG PRINT
-        with DatabaseConnection() as conn:
-            print("SEARCH_FTS_TEST: DatabaseConnection context entered", file=sys.stderr) # DEBUG PRINT
-            logger.error("SEARCH_FTS_TEST_ERROR_LEVEL: DB Context Entered") # DEBUG ERROR LOG
-
-            if conn is None:
-                print("SEARCH_FTS_TEST: DB Connection is None", file=sys.stderr) # DEBUG PRINT
-                logger.error("/search_fts_test: DB Connection is None, cannot proceed with cursor.")
-            else:
-                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-                    print("SEARCH_FTS_TEST: Cursor created", file=sys.stderr) # DEBUG PRINT
-                    logger.error("SEARCH_FTS_TEST_ERROR_LEVEL: Cursor Created")# DEBUG ERROR LOG
-                    
-                    mogrified_query_str = "Error mogrifying query"
-                    try:
-                        mogrified_query_str = cursor.mogrify(query, params).decode('utf-8')
-                        print(f"SEARCH_FTS_TEST: Mogrified query: {mogrified_query_str}", file=sys.stderr) # DEBUG PRINT
-                    except Exception as mog_err:
-                        print(f"SEARCH_FTS_TEST: Error during mogrify: {mog_err}", file=sys.stderr) # DEBUG PRINT
-                        logger.error(f"/search_fts_test: Error during mogrify: {mog_err}")
-
-                    cursor.execute(query, params)
-                    print("SEARCH_FTS_TEST: Query executed", file=sys.stderr) # DEBUG PRINT
-                    
-                    db_results_raw = cursor.fetchall()
-                    print("SEARCH_FTS_TEST: fetchall() completed", file=sys.stderr) # DEBUG PRINT
-
-                    if db_results_raw is not None:
-                        print(f"SEARCH_FTS_TEST: RAW DB RESULTS COUNT: {len(db_results_raw)}", file=sys.stderr) # DEBUG PRINT
-                        if len(db_results_raw) > 0:
-                            # Log only a few to prevent excessive log spam
-                            for i, row_data in enumerate(db_results_raw[:3]):
-                                print(f"SEARCH_FTS_TEST: Row {i}: {dict(row_data)}", file=sys.stderr) # DEBUG PRINT
-                    else:
-                        print("SEARCH_FTS_TEST: db_results_raw is None", file=sys.stderr) # DEBUG PRINT
-                        db_results_raw = []
+        with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute(query, params)
+            db_results_raw = cursor.fetchall()
     except Exception as e:
-        print(f"SEARCH_FTS_TEST: DB EXCEPTION BLOCK: {e}", file=sys.stderr) # DEBUG PRINT
-        logger.error(f"/search_fts_test: DB EXCEPTION BLOCK: {e}", exc_info=True)
+        logger.error(f"/search_fts_test: DB error for normalized input '{normalized_for_pg}': {e}", exc_info=True)
         sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
         return jsonify({"error": "Database query failed"}), 500
 
-    print("SEARCH_FTS_TEST: AFTER DATABASE QUERY BLOCK", file=sys.stderr) # DEBUG PRINT
-
     if not db_results_raw:
-        print(f"SEARCH_FTS_TEST: No DB results for {normalized_for_pg}, returning empty list.", file=sys.stderr) # DEBUG PRINT
+        logger.info(f"/search_fts_test: No DB results for normalized input '{normalized_for_pg}', returning empty list.")
         return jsonify([])
     
-    # --- Result Formatting ---
     db_results = [dict(row) for row in db_results_raw]
     restaurant_dict_hybrid = {}
     for row_dict in db_results:
@@ -377,40 +326,33 @@ def search_fts_test():
     
     formatted_results = [dict(data, inspections=list(data['inspections'].values())) for data in restaurant_dict_hybrid.values()]
 
-    # --- CACHE SET DISABLED FOR DEBUGGING ---
-    # redis_conn_for_set = get_redis_client() # Ensure redis_conn is defined if used here
-    # if redis_conn_for_set:
-    #     try:
-    #         redis_conn_for_set.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
-    #         logger.info(f"/search_fts_test: Stored result in cache for key: {cache_key}")
-    #     except Exception as e:
-    #         logger.error(f"/search_fts_test: Redis SETEX error for key {cache_key}: {e}")
-    #         sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
+    # Re-enabled caching
+    if redis_conn:
+        try:
+            redis_conn.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
+            logger.info(f"/search_fts_test: Stored result in cache for key: {cache_key}")
+        except Exception as e:
+            logger.error(f"/search_fts_test: Redis SETEX error for key {cache_key}: {e}")
+            sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
             
     return jsonify(formatted_results)
 
 # --- Other Routes (/recent, /test-db-connection, /trigger-update) ---
+# ... (These routes remain unchanged) ...
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
     logger.info("Received request for /recent")
     days = request.args.get('days', '7');
     try: days = int(days); days = 7 if days <= 0 else days
     except ValueError: days = 7
-    logger.info(f"Fetching recent restaurants (graded A/B/C) from past {days} days.") # Added logging for days
     query = """ SELECT DISTINCT ON (r.camis) r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone, r.latitude, r.longitude, r.grade, r.inspection_date, r.cuisine_description FROM restaurants r WHERE r.grade IN ('A', 'B', 'C') AND r.inspection_date >= (CURRENT_DATE - INTERVAL '%s days') ORDER BY r.camis, r.inspection_date DESC LIMIT 50 """
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute(query, (days,)); results_raw = cursor.fetchall()
             results = [dict(row) for row in results_raw]
             return jsonify(results)
-    except psycopg2.Error as db_err:
-        logger.error(f"Error fetching recent restaurants: {db_err}")
-        sentry_sdk.capture_exception(db_err) if SentryConfig.SENTRY_DSN else None
-        return jsonify({"error": "DB error"}), 500
-    except Exception as e:
-        logger.error(f"Unexpected error fetching recent restaurants: {e}", exc_info=True)
-        sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
-        return jsonify({"error": "Unexpected error"}), 500
+    except psycopg2.Error as db_err: logger.error(f"Error fetching recent restaurants: {db_err}"); sentry_sdk.capture_exception(db_err) if SentryConfig.SENTRY_DSN else None; return jsonify({"error": "DB error"}), 500
+    except Exception as e: logger.error(f"Unexpected error fetching recent restaurants: {e}", exc_info=True); sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None; return jsonify({"error": "Unexpected error"}), 500
 
 @app.route('/test-db-connection', methods=['GET'])
 def test_db_connection():
@@ -430,13 +372,9 @@ def trigger_update():
         provided_key = request.headers.get('X-Update-Secret'); expected_key = APIConfig.UPDATE_SECRET_KEY
         if not expected_key: return jsonify({"status": "error", "message": "Update trigger not configured."}), 500
         if not provided_key or not secrets.compare_digest(provided_key, expected_key): return jsonify({"status": "error", "message": "Unauthorized."}), 403
-        # Run in a separate thread to avoid blocking the request
-        threading.Thread(target=run_database_update, args=(5,), daemon=True).start() # Pass default days_back
+        threading.Thread(target=run_database_update, args=(5,), daemon=True).start()
         return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
-    except Exception as e:
-        logger.error(f"Err in /trigger-update: {e}", exc_info=True)
-        sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
-        return jsonify({"status": "error"}), 500
+    except Exception as e: logger.error(f"Err in /trigger-update: {e}", exc_info=True); sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None; return jsonify({"status": "error"}), 500
 
 # --- Error Handlers ---
 @app.errorhandler(404)
