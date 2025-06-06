@@ -1,4 +1,4 @@
-# app_search.py - Final Production Version
+# app_search.py - Final Production Version v2
 
 # Standard library imports
 import os
@@ -238,7 +238,7 @@ def search_fts_test():
 
     # Caching is now re-enabled
     cache_key = f"search_hybrid_prod_v1:{normalized_for_pg}"
-    CACHE_TTL_SECONDS = 3600 * 4 # Cache for 4 hours
+    CACHE_TTL_SECONDS = 3600 * 4
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -255,11 +255,19 @@ def search_fts_test():
     if query_terms:
         query_terms[-1] = query_terms[-1] + ':*'
     fts_query_string = ' '.join(query_terms)
+
+    # --- START: MODIFIED PARAMETER LOGIC ---
+    like_pattern = normalized_for_pg + '%'
+    params = (normalized_for_pg, fts_query_string, like_pattern) # Now a 3-item tuple
+    # --- END: MODIFIED PARAMETER LOGIC ---
     
-    # --- THIS IS THE CORRECTED SQL QUERY ---
+    # --- START: MODIFIED SQL QUERY ---
     query = """
     WITH user_input AS (
-        SELECT %s AS normalized_query, %s AS fts_query_string
+        SELECT 
+            %s AS normalized_query, 
+            %s AS fts_query_string,
+            %s AS like_pattern
     )
     SELECT
         r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
@@ -280,8 +288,8 @@ def search_fts_test():
         (similarity(r.dba_normalized_search, ui.normalized_query) > 0.22)
     ORDER BY
         -- Prioritize results where the normalized name starts with the user's query
-        CASE WHEN r.dba_normalized_search LIKE (ui.normalized_query || '%') THEN 0 ELSE 1 END ASC,
-        -- Then, rank by a composite score of FTS and Trigram similarities
+        CASE WHEN r.dba_normalized_search LIKE ui.like_pattern THEN 0 ELSE 1 END ASC,
+        -- Then, rank by a composite score
         (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32), 0) * 1.2) +
         (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 1.0) +
         (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.2) DESC,
@@ -290,8 +298,8 @@ def search_fts_test():
         r.inspection_date DESC
     LIMIT 75;
     """
+    # --- END: MODIFIED SQL QUERY ---
     
-    params = (normalized_for_pg, fts_query_string)
     db_results_raw = None
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
