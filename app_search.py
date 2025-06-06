@@ -268,11 +268,10 @@ def search_fts_test():
     starts_with_pattern = f"{normalized_search_term}%"
     contains_pattern = f"%{normalized_search_term}%"
     
+# This is the CORRECTED query string for the /search_fts_test function
     query = """
     WITH RankedRestaurants AS (
         SELECT
-            -- Use DISTINCT ON (camis) at the beginning of the SELECT list
-            -- to get one row per unique restaurant, based on the latest inspection date.
             DISTINCT ON (camis)
             camis,
             dba,
@@ -284,9 +283,11 @@ def search_fts_test():
             latitude,
             longitude,
             cuisine_description,
-            dba_normalized_search, -- Include for ordering
+            dba_normalized_search,
             inspection_date,
-            grade
+            grade,
+            critical_flag, -- Include these columns from the latest inspection
+            inspection_type
         FROM restaurants
         WHERE dba_normalized_search ILIKE %s
         ORDER BY
@@ -309,9 +310,10 @@ def search_fts_test():
     )
     SELECT
         pr.camis, pr.dba, pr.boro, pr.building, pr.street, pr.zipcode, pr.phone,
-        pr.latitude, pr.longitude, v.inspection_date, v.critical_flag, v.grade,
-        v.inspection_type, v.violation_code, v.violation_description, pr.cuisine_description
+        pr.latitude, pr.longitude, pr.inspection_date, pr.critical_flag, pr.grade,
+        pr.inspection_type, v.violation_code, v.violation_description, pr.cuisine_description
     FROM PaginatedRestaurants pr
+    -- Join each of the unique restaurants with ALL of its violations
     LEFT JOIN violations v ON pr.camis = v.camis
     ORDER BY
         -- Re-apply the same ordering to keep the paginated restaurants in order
@@ -322,9 +324,10 @@ def search_fts_test():
         END,
         length(pr.dba_normalized_search),
         pr.dba ASC,
+        -- Also sort by inspection date to group violations correctly
+        pr.inspection_date DESC,
         v.inspection_date DESC;
-    """
-    
+"""
     # We need to pass the search patterns multiple times for the different parts of the query
     params = (contains_pattern, exact_pattern, starts_with_pattern, limit, offset, exact_pattern, starts_with_pattern)
     db_results_raw = None
