@@ -219,52 +219,105 @@ def search_original():
     return jsonify(formatted_results)
 
 # --- /search_fts_test ENDPOINT (PRODUCTION VERSION) ---
-# --- /search_fts_test ENDPOINT (DEFINITIVE DEPLOYMENT TEST) ---
+# --- /search_fts_test ENDPOINT (Final Production Version) ---
 @app.route('/search_fts_test', methods=['GET'])
 def search_fts_test():
-    logger.info("---- /search_fts_test: RUNNING DEFINITIVE DEPLOYMENT TEST ----")
-    
-    # For this test, the query is completely hard-coded to isolate the deployment issue.
-    # We are ignoring the user's search term to see if this specific query runs.
+    logger.info("---- /search_fts_test: Request received ----")
+    search_term_from_user = request.args.get('name', '').strip()
+    if not search_term_from_user:
+        return jsonify({"error": "Search term is empty"}), 400
+
+    normalized_for_pg = normalize_search_term_for_hybrid(search_term_from_user)
+
+    if normalized_for_pg in SEARCH_TERM_SYNONYMS:
+        original_term = normalized_for_pg
+        normalized_for_pg = SEARCH_TERM_SYNONYMS[original_term]
+        logger.info(f"/search_fts_test: Applied synonym: '{original_term}' -> '{normalized_for_pg}'")
+
+    if not normalized_for_pg:
+        return jsonify([])
+
+    # Caching is re-enabled for production
+    cache_key = f"search_hybrid_prod_v2:{normalized_for_pg}" # Using v2 to ensure fresh cache
+    CACHE_TTL_SECONDS = 3600 * 4
+    redis_conn = get_redis_client()
+    if redis_conn:
+        try:
+            cached_result_str = redis_conn.get(cache_key)
+            if cached_result_str:
+                logger.info(f"/search_fts_test: Cache hit for key: {cache_key}")
+                return jsonify(json.loads(cached_result_str))
+            logger.info(f"/search_fts_test: Cache miss for key: {cache_key}")
+        except Exception as e:
+             logger.error(f"/search_fts_test: Redis GET error for key {cache_key}: {e}")
+             sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
+
+    query_terms = normalized_for_pg.split()
+    if query_terms:
+        query_terms[-1] = query_terms[-1] + ':*'
+    fts_query_string = ' '.join(query_terms)
+
+    like_pattern = normalized_for_pg + '%'
+    params = (normalized_for_pg, fts_query_string, like_pattern) # 3-item tuple
+
     query = """
+    WITH user_input AS (
         SELECT
-            r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
-            r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
-            r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description
-        FROM
-            restaurants r
-            LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        WHERE
-            r.camis = '50127394';
+            %s AS normalized_query,
+            %s AS fts_query_string,
+            %s AS like_pattern
+    )
+    SELECT
+        r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
+        r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
+        r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description,
+        ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32) AS fts_score,
+        word_similarity(ui.normalized_query, r.dba_normalized_search) AS trgm_word_similarity,
+        similarity(r.dba_normalized_search, ui.normalized_query) AS trgm_direct_similarity
+    FROM
+        restaurants r
+        JOIN user_input ui ON TRUE
+        LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
+    WHERE
+        (r.dba_tsv @@ websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string))
+        OR
+        (word_similarity(ui.normalized_query, r.dba_normalized_search) > 0.25)
+        OR
+        (similarity(r.dba_normalized_search, ui.normalized_query) > 0.22)
+    ORDER BY
+        -- Tier 1: Prioritize results where the normalized name starts with the user's query
+        CASE WHEN r.dba_normalized_search LIKE ui.like_pattern THEN 0 ELSE 1 END ASC,
+        -- Tier 2: Rank by a composite score
+        (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32), 0) * 1.2) +
+        (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 1.0) +
+        (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.2) DESC,
+        -- Tier 3: Finally, sort by name and date as tie-breakers
+        r.dba ASC,
+        r.inspection_date DESC
+    LIMIT 75;
     """
-    
+
     db_results_raw = None
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            # We pass an empty tuple for params because there are no %s placeholders
-            cursor.execute(query, ())
+            cursor.execute(query, params)
             db_results_raw = cursor.fetchall()
-            logger.info(f"DEFINITIVE TEST: RAW DB RESULTS COUNT: {len(db_results_raw)}")
-            if db_results_raw:
-                # This log will tell us exactly what the database returned.
-                logger.info(f"DEFINITIVE TEST: First row found is DBA: '{db_results_raw[0]['dba']}' with CAMIS: '{db_results_raw[0]['camis']}'")
-
     except Exception as e:
-        logger.error(f"DEFINITIVE TEST: DB error: {e}", exc_info=True)
+        logger.error(f"/search_fts_test: DB error for normalized input '{normalized_for_pg}': {e}", exc_info=True)
+        sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
         return jsonify({"error": "Database query failed"}), 500
 
     if not db_results_raw:
-        logger.info(f"DEFINITIVE TEST: No DB results found for hard-coded CAMIS.")
+        logger.info(f"/search_fts_test: No DB results for normalized input '{normalized_for_pg}', returning empty list.")
         return jsonify([])
-    
-    # --- Standard Result Processing Logic ---
+
     db_results = [dict(row) for row in db_results_raw]
     restaurant_dict_hybrid = {}
     for row_dict in db_results:
         camis = row_dict.get('camis')
         if not camis: continue
         if camis not in restaurant_dict_hybrid:
-            restaurant_dict_hybrid[camis] = {k: v for k, v in row_dict.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
+            restaurant_dict_hybrid[camis] = {k: v for k, v in row_dict.items() if k not in ['fts_score', 'trgm_word_similarity', 'trgm_direct_similarity', 'violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
             restaurant_dict_hybrid[camis]['inspections'] = {}
         inspection_date_obj = row_dict.get('inspection_date')
         if inspection_date_obj:
@@ -275,12 +328,21 @@ def search_fts_test():
                 violation = {'violation_code': row_dict.get('violation_code'), 'violation_description': row_dict.get('violation_description')}
                 if violation not in restaurant_dict_hybrid[camis]['inspections'][inspection_date_str]['violations']:
                     restaurant_dict_hybrid[camis]['inspections'][inspection_date_str]['violations'].append(violation)
-    
+
     formatted_results = [dict(data, inspections=list(data['inspections'].values())) for data in restaurant_dict_hybrid.values()]
+
+    # Re-enabled caching
+    if redis_conn:
+        try:
+            redis_conn.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
+            logger.info(f"/search_fts_test: Stored result in cache for key: {cache_key}")
+        except Exception as e:
+            logger.error(f"/search_fts_test: Redis SETEX error for key {cache_key}: {e}")
+            sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
+
     return jsonify(formatted_results)
     
-# --- Other Routes (/recent, /test-db-connection, /trigger-update) ---
-# ... (These routes remain unchanged) ...
+
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
     logger.info("Received request for /recent")
