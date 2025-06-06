@@ -271,6 +271,9 @@ def search_fts_test():
     query = """
     WITH RankedRestaurants AS (
         SELECT
+            -- Use DISTINCT ON (camis) at the beginning of the SELECT list
+            -- to get one row per unique restaurant, based on the latest inspection date.
+            DISTINCT ON (camis)
             camis,
             dba,
             boro,
@@ -281,15 +284,14 @@ def search_fts_test():
             latitude,
             longitude,
             cuisine_description,
-            -- Use DISTINCT ON and ORDER BY to get the latest inspection date for each restaurant
-            -- This ensures we get one row per unique restaurant for ranking purposes.
-            DISTINCT ON (camis) r.inspection_date,
-            r.grade
-        FROM restaurants r
-        WHERE r.dba_normalized_search ILIKE %s
+            dba_normalized_search, -- Include for ordering
+            inspection_date,
+            grade
+        FROM restaurants
+        WHERE dba_normalized_search ILIKE %s
         ORDER BY
-            r.camis,
-            r.inspection_date DESC
+            camis,
+            inspection_date DESC
     ),
     PaginatedRestaurants AS (
         SELECT
