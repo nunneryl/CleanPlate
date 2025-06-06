@@ -273,8 +273,7 @@ def search_fts_test():
     
     query = """
     WITH user_input AS (
-        SELECT %s AS normalized_query, %s AS fts_query_string
-    )
+        SELECT %s AS normalized_query, %s AS fts_query_string)
     SELECT
         r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
         r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
@@ -284,7 +283,7 @@ def search_fts_test():
         similarity(r.dba_normalized_search, ui.normalized_query) AS trgm_direct_similarity
     FROM
         restaurants r
-        JOIN user_input ui ON TRUE 
+        JOIN user_input ui ON TRUE
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
     WHERE
         (r.dba_tsv @@ websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string))
@@ -292,15 +291,19 @@ def search_fts_test():
         (word_similarity(ui.normalized_query, r.dba_normalized_search) > 0.25)
         OR
         (similarity(r.dba_normalized_search, ui.normalized_query) > 0.22)
-
     ORDER BY
+        -- START: NEW CASE STATEMENT FOR RANKING
+        -- Prioritize results where the normalized name starts with the user's query
+        CASE WHEN r.dba_normalized_search LIKE (ui.normalized_query || '%') THEN 0 ELSE 1 END ASC,
+        -- END: NEW CASE STATEMENT FOR RANKING
         (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32), 0) * 1.2) +
         (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 1.0) +
         (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.2) DESC,
         r.dba ASC,
-        r.inspection_date DESC   
+        r.inspection_date DESC
         LIMIT 75;
     """
+    
     params = (normalized_for_pg, fts_query_string)
     db_results_raw = None
     print("SEARCH_FTS_TEST: ABOUT TO TRY DATABASE QUERY BLOCK", file=sys.stderr) # DEBUG PRINT
