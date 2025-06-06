@@ -261,11 +261,11 @@ def search_fts_test():
     params = (normalized_for_pg, fts_query_string, like_pattern) # Now a 3-item tuple
     # --- END: MODIFIED PARAMETER LOGIC ---
     
-    # --- START: MODIFIED SQL QUERY ---
+    # --- START: MODIFIED SQL QUERY --
     query = """
     WITH user_input AS (
-        SELECT 
-            %s AS normalized_query, 
+        SELECT
+            %s AS normalized_query,
             %s AS fts_query_string,
             %s AS like_pattern
     )
@@ -273,9 +273,7 @@ def search_fts_test():
         r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
         r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
         r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description,
-        ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32) AS fts_score,
-        word_similarity(ui.normalized_query, r.dba_normalized_search) AS trgm_word_similarity,
-        similarity(r.dba_normalized_search, ui.normalized_query) AS trgm_direct_similarity
+        ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32) AS fts_score
     FROM
         restaurants r
         JOIN user_input ui ON TRUE
@@ -283,20 +281,17 @@ def search_fts_test():
     WHERE
         (r.dba_tsv @@ websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string))
         OR
-        (word_similarity(ui.normalized_query, r.dba_normalized_search) > 0.25)
-        OR
-        (similarity(r.dba_normalized_search, ui.normalized_query) > 0.22)
+        (word_similarity(ui.normalized_query, r.dba_normalized_search) > 0.3) -- Slightly increased threshold
     ORDER BY
-        -- Prioritize results where the normalized name starts with the user's query
+        -- Tier 1: Restaurants that start with the search term
         CASE WHEN r.dba_normalized_search LIKE ui.like_pattern THEN 0 ELSE 1 END ASC,
-        -- Then, rank by a composite score
-        (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32), 0) * 1.2) +
-        (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 1.0) +
-        (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.2) DESC,
-        -- Finally, sort by name and date as tie-breakers
+        -- Tier 2: Rank by FTS score (relevance)
+        ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32) DESC,
+        -- Tier 3: As a final tie-breaker, sort alphabetically
         r.dba ASC,
         r.inspection_date DESC
     LIMIT 75;
+
     """
     # --- END: MODIFIED SQL QUERY ---
     
