@@ -219,9 +219,10 @@ def search_original():
     return jsonify(formatted_results)
 
 # --- /search_fts_test ENDPOINT (Final Upgraded Version: ILIKE + Trigrams for Typos) ---
+# --- /search_fts_test ENDPOINT (Final Production Version with True Pagination) ---
 @app.route('/search_fts_test', methods=['GET'])
 def search_fts_test():
-    logger.info("---- /search_fts_test: Request received (ILIKE + Trigrams) ----")
+    logger.info("---- /search_fts_test: Request received (Final with True Pagination) ----")
     search_term_from_user = request.args.get('name', '').strip()
     
     try:
@@ -250,8 +251,8 @@ def search_fts_test():
     if not normalized_search_term:
         return jsonify([])
 
-    cache_key = f"search_final_v1:{normalized_search_term}:p{page}:pp{per_page}"
-    CACHE_TTL_SECONDS = 3600 * 4
+    cache_key = f"search_true_pagination_v2:{normalized_search_term}:p{page}:pp{per_page}"
+    CACHE_TTL_SECONDS = 3600 * 2
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -269,58 +270,85 @@ def search_fts_test():
     starts_with_pattern = f"{normalized_search_term}%"
     contains_pattern = f"%{normalized_search_term}%"
     
-    # This query now includes a similarity check for typo tolerance
+    # This is the final, corrected query with true pagination
     query = """
+    WITH RankedRestaurants AS (
+        SELECT
+            DISTINCT ON (camis)
+            camis,
+            dba,
+            boro,
+            building,
+            street,
+            zipcode,
+            phone,
+            latitude,
+            longitude,
+            cuisine_description,
+            dba_normalized_search
+        FROM restaurants
+        WHERE dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4
+    ),
+    PaginatedRestaurants AS (
+        SELECT
+            *
+        FROM RankedRestaurants
+        ORDER BY
+            CASE
+                WHEN dba_normalized_search = %s THEN 0 -- Exact match
+                WHEN dba_normalized_search ILIKE %s THEN 1 -- Starts with
+                ELSE 2 -- Contains
+            END,
+            similarity(dba_normalized_search, %s) DESC,
+            length(dba_normalized_search),
+            dba ASC
+        LIMIT %s OFFSET %s
+    )
     SELECT
-        r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
-        r.latitude, r.longitude, v.inspection_date, v.critical_flag, v.grade,
-        v.inspection_type, v.violation_code, v.violation_description, r.cuisine_description,
-        similarity(r.dba_normalized_search, %s) AS similarity_score
-    FROM
-        restaurants r
-        LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-    WHERE
-        -- Find records that either contain the substring OR are very similar (for typos)
-        r.dba_normalized_search ILIKE %s
-        OR similarity(r.dba_normalized_search, %s) > 0.4
+        pr.camis, pr.dba, pr.boro, pr.building, pr.street, pr.zipcode, pr.phone,
+        pr.latitude, pr.longitude, r_full.inspection_date, r_full.critical_flag, r_full.grade,
+        r_full.inspection_type, v.violation_code, v.violation_description, pr.cuisine_description
+    FROM PaginatedRestaurants pr
+    JOIN restaurants r_full ON pr.camis = r_full.camis
+    LEFT JOIN violations v ON r_full.camis = v.camis AND r_full.inspection_date = v.inspection_date
     ORDER BY
-        -- Rank by exact match, then starts-with, then by similarity score for typos
+        -- Re-apply the same ordering to keep the paginated restaurants in order
         CASE
-            WHEN r.dba_normalized_search = %s THEN 0
-            WHEN r.dba_normalized_search ILIKE %s THEN 1
+            WHEN pr.dba_normalized_search = %s THEN 0
+            WHEN pr.dba_normalized_search ILIKE %s THEN 1
             ELSE 2
         END,
-        similarity(r.dba_normalized_search, %s) DESC,
-        length(r.dba_normalized_search),
-        r.dba ASC,
-        r.inspection_date DESC
-    LIMIT %s OFFSET %s;
+        similarity(pr.dba_normalized_search, %s) DESC,
+        length(pr.dba_normalized_search),
+        pr.dba ASC,
+        r_full.inspection_date DESC;
     """
     
-    # The normalized term is passed multiple times for the different parts of the query
+    # The params tuple must match the placeholders in the full query
     params = (
-        exact_pattern,       # For calculating similarity_score
-        contains_pattern,    # For ILIKE
-        exact_pattern,       # For the main similarity() check
-        exact_pattern,       # For the ORDER BY CASE exact match
-        starts_with_pattern, # For the ORDER BY CASE starts-with match
-        exact_pattern,       # For the ORDER BY similarity()
-        limit,
-        offset
+        contains_pattern,      # For WHERE ILIKE
+        exact_pattern,         # For WHERE similarity()
+        exact_pattern,         # For ORDER BY CASE exact
+        starts_with_pattern,   # For ORDER BY CASE starts-with
+        exact_pattern,         # For ORDER BY similarity()
+        limit,                 # For LIMIT
+        offset,                # For OFFSET
+        exact_pattern,         # For final ORDER BY CASE exact
+        starts_with_pattern,   # For final ORDER BY CASE starts-with
+        exact_pattern          # For final ORDER BY similarity()
     )
-
+    
     db_results_raw = None
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute(query, params)
             db_results_raw = cursor.fetchall()
     except Exception as e:
-        logger.error(f"/search_fts_test: DB error for ILIKE search '{normalized_search_term}': {e}", exc_info=True)
+        logger.error(f"/search_fts_test: DB error for search '{normalized_search_term}': {e}", exc_info=True)
         sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
         return jsonify({"error": "Database query failed"}), 500
 
     if not db_results_raw:
-        logger.info(f"/search_fts_test: No DB results for ILIKE search '{normalized_search_term}', returning empty list.")
         return jsonify([])
 
     # --- Standard Result Processing Logic ---
@@ -330,7 +358,7 @@ def search_fts_test():
         camis = row_dict.get('camis')
         if not camis: continue
         if camis not in restaurant_dict_hybrid:
-            restaurant_dict_hybrid[camis] = {k: v for k, v in row_dict.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type', 'similarity_score']}
+            restaurant_dict_hybrid[camis] = {k: v for k, v in row_dict.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
             restaurant_dict_hybrid[camis]['inspections'] = {}
         inspection_date_obj = row_dict.get('inspection_date')
         if inspection_date_obj:
