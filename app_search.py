@@ -218,27 +218,24 @@ def search_original():
         except Exception as e: logger.error(f"Original Search Redis SETEX error: {e}"); sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     return jsonify(formatted_results)
 
-# --- /search_fts_test ENDPOINT (Final Version with Pagination) ---
+# --- /search_fts_test ENDPOINT (Final Version with True Pagination) ---
 @app.route('/search_fts_test', methods=['GET'])
 def search_fts_test():
-    logger.info("---- /search_fts_test: Request received (ILIKE with Hybrid Ranking & Pagination) ----")
+    logger.info("---- /search_fts_test: Request received (ILIKE with True Pagination) ----")
     search_term_from_user = request.args.get('name', '').strip()
     
-    # --- START: PAGINATION LOGIC ---
     try:
         page = int(request.args.get('page', 1))
-        per_page = int(request.args.get('per_page', 25)) # Default to 25 results per page
+        per_page = int(request.args.get('per_page', 25))
         if page < 1: page = 1
         if per_page < 1: per_page = 25
-        if per_page > 100: per_page = 100 # Set a max limit
+        if per_page > 100: per_page = 100
     except ValueError:
         page = 1
         per_page = 25
     
     offset = (page - 1) * per_page
     limit = per_page
-    
-    # --- END: PAGINATION LOGIC ---
 
     if not search_term_from_user:
         return jsonify({"error": "Search term is empty"}), 400
@@ -253,8 +250,7 @@ def search_fts_test():
     if not normalized_search_term:
         return jsonify([])
 
-    # The cache key now includes the page and per_page to store each page separately
-    cache_key = f"search_ilike_ranked_v2:{normalized_search_term}:p{page}:pp{per_page}"
+    cache_key = f"search_ilike_true_pagination_v1:{normalized_search_term}:p{page}:pp{per_page}"
     CACHE_TTL_SECONDS = 3600 * 4
     redis_conn = get_redis_client()
     if redis_conn:
@@ -268,34 +264,67 @@ def search_fts_test():
              logger.error(f"/search_fts_test: Redis GET error for key {cache_key}: {e}")
              sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
 
-    # Prepare patterns for the SQL query
     exact_pattern = normalized_search_term
     starts_with_pattern = f"{normalized_search_term}%"
     contains_pattern = f"%{normalized_search_term}%"
     
     query = """
+    WITH RankedRestaurants AS (
+        SELECT
+            camis,
+            dba,
+            boro,
+            building,
+            street,
+            zipcode,
+            phone,
+            latitude,
+            longitude,
+            cuisine_description,
+            -- Use DISTINCT ON and ORDER BY to get the latest inspection date for each restaurant
+            -- This ensures we get one row per unique restaurant for ranking purposes.
+            DISTINCT ON (camis) r.inspection_date,
+            r.grade
+        FROM restaurants r
+        WHERE r.dba_normalized_search ILIKE %s
+        ORDER BY
+            r.camis,
+            r.inspection_date DESC
+    ),
+    PaginatedRestaurants AS (
+        SELECT
+            *
+        FROM RankedRestaurants
+        ORDER BY
+            CASE
+                WHEN dba_normalized_search = %s THEN 0 -- Exact match
+                WHEN dba_normalized_search ILIKE %s THEN 1 -- Starts with
+                ELSE 2 -- Contains
+            END,
+            length(dba_normalized_search),
+            dba ASC
+        LIMIT %s OFFSET %s
+    )
     SELECT
-        r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
-        r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
-        r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description
-    FROM
-        restaurants r
-        LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-    WHERE
-        r.dba_normalized_search ILIKE %s
+        pr.camis, pr.dba, pr.boro, pr.building, pr.street, pr.zipcode, pr.phone,
+        pr.latitude, pr.longitude, v.inspection_date, v.critical_flag, v.grade,
+        v.inspection_type, v.violation_code, v.violation_description, pr.cuisine_description
+    FROM PaginatedRestaurants pr
+    LEFT JOIN violations v ON pr.camis = v.camis
     ORDER BY
+        -- Re-apply the same ordering to keep the paginated restaurants in order
         CASE
-            WHEN r.dba_normalized_search = %s THEN 0
-            WHEN r.dba_normalized_search ILIKE %s THEN 1
+            WHEN pr.dba_normalized_search = %s THEN 0
+            WHEN pr.dba_normalized_search ILIKE %s THEN 1
             ELSE 2
         END,
-        length(r.dba_normalized_search),
-        r.dba ASC,
-        r.inspection_date DESC
-    LIMIT %s OFFSET %s;
+        length(pr.dba_normalized_search),
+        pr.dba ASC,
+        v.inspection_date DESC;
     """
     
-    params = (contains_pattern, exact_pattern, starts_with_pattern, limit, offset)
+    # We need to pass the search patterns multiple times for the different parts of the query
+    params = (contains_pattern, exact_pattern, starts_with_pattern, limit, offset, exact_pattern, starts_with_pattern)
     db_results_raw = None
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
