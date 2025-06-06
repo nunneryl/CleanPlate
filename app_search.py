@@ -218,28 +218,43 @@ def search_original():
         except Exception as e: logger.error(f"Original Search Redis SETEX error: {e}"); sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     return jsonify(formatted_results)
 
-# --- /search_fts_test ENDPOINT (Final Version: ILIKE with Synonyms) ---
+# --- /search_fts_test ENDPOINT (Final Version with Pagination) ---
 @app.route('/search_fts_test', methods=['GET'])
 def search_fts_test():
-    logger.info("---- /search_fts_test: Request received (ILIKE with Synonyms) ----")
+    logger.info("---- /search_fts_test: Request received (ILIKE with Hybrid Ranking & Pagination) ----")
     search_term_from_user = request.args.get('name', '').strip()
+    
+    # --- START: PAGINATION LOGIC ---
+    try:
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 25)) # Default to 25 results per page
+        if page < 1: page = 1
+        if per_page < 1: per_page = 25
+        if per_page > 100: per_page = 100 # Set a max limit
+    except ValueError:
+        page = 1
+        per_page = 25
+    
+    offset = (page - 1) * per_page
+    limit = per_page
+    
+    # --- END: PAGINATION LOGIC ---
+
     if not search_term_from_user:
         return jsonify({"error": "Search term is empty"}), 400
 
-    # Step 1: Normalize the user's search term first.
-    normalized_for_pg = normalize_search_term_for_hybrid(search_term_from_user)
+    normalized_search_term = normalize_search_term_for_hybrid(search_term_from_user)
 
-    # Step 2: Apply synonyms if a match is found.
-    if normalized_for_pg in SEARCH_TERM_SYNONYMS:
-        original_term = normalized_for_pg
-        normalized_for_pg = SEARCH_TERM_SYNONYMS[original_term]
-        logger.info(f"/search_fts_test: Applied synonym: '{original_term}' -> '{normalized_for_pg}'")
+    if normalized_search_term in SEARCH_TERM_SYNONYMS:
+        original_term = normalized_search_term
+        normalized_search_term = SEARCH_TERM_SYNONYMS[original_term]
+        logger.info(f"/search_fts_test: Applied synonym: '{original_term}' -> '{normalized_search_term}'")
 
-    if not normalized_for_pg:
+    if not normalized_search_term:
         return jsonify([])
 
-    # Caching is re-enabled for production
-    cache_key = f"search_ilike_prod_v1:{normalized_for_pg}" # New cache prefix for the new logic
+    # The cache key now includes the page and per_page to store each page separately
+    cache_key = f"search_ilike_ranked_v2:{normalized_search_term}:p{page}:pp{per_page}"
     CACHE_TTL_SECONDS = 3600 * 4
     redis_conn = get_redis_client()
     if redis_conn:
@@ -253,8 +268,10 @@ def search_fts_test():
              logger.error(f"/search_fts_test: Redis GET error for key {cache_key}: {e}")
              sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
 
-    # Step 3: Use the final normalized term in a simple ILIKE query against the normalized column.
-    search_pattern = f"%{normalized_for_pg}%"
+    # Prepare patterns for the SQL query
+    exact_pattern = normalized_search_term
+    starts_with_pattern = f"{normalized_search_term}%"
+    contains_pattern = f"%{normalized_search_term}%"
     
     query = """
     SELECT
@@ -267,28 +284,33 @@ def search_fts_test():
     WHERE
         r.dba_normalized_search ILIKE %s
     ORDER BY
-        -- Simple alphabetical sort is best for a broad ILIKE search
+        CASE
+            WHEN r.dba_normalized_search = %s THEN 0
+            WHEN r.dba_normalized_search ILIKE %s THEN 1
+            ELSE 2
+        END,
+        length(r.dba_normalized_search),
         r.dba ASC,
         r.inspection_date DESC
-    LIMIT 250; -- Increased limit for broader searches
+    LIMIT %s OFFSET %s;
     """
     
-    params = (search_pattern,)
+    params = (contains_pattern, exact_pattern, starts_with_pattern, limit, offset)
     db_results_raw = None
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute(query, params)
             db_results_raw = cursor.fetchall()
     except Exception as e:
-        logger.error(f"/search_fts_test: DB error for ILIKE search '{normalized_for_pg}': {e}", exc_info=True)
+        logger.error(f"/search_fts_test: DB error for ILIKE search '{normalized_search_term}': {e}", exc_info=True)
         sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
         return jsonify({"error": "Database query failed"}), 500
 
     if not db_results_raw:
-        logger.info(f"/search_fts_test: No DB results for ILIKE search '{normalized_for_pg}', returning empty list.")
+        logger.info(f"/search_fts_test: No DB results for ILIKE search '{normalized_search_term}', returning empty list.")
         return jsonify([])
 
-    # --- Standard Result Processing Logic ---
+    # --- Standard Result Processing Logic (unchanged) ---
     db_results = [dict(row) for row in db_results_raw]
     restaurant_dict_hybrid = {}
     for row_dict in db_results:
@@ -318,6 +340,8 @@ def search_fts_test():
             sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
             
     return jsonify(formatted_results)
+    
+    
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
     logger.info("Received request for /recent")
