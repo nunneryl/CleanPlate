@@ -218,17 +218,18 @@ def search_original():
         except Exception as e: logger.error(f"Original Search Redis SETEX error: {e}"); sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
     return jsonify(formatted_results)
 
-# --- /search_fts_test ENDPOINT (PRODUCTION VERSION) ---
-# --- /search_fts_test ENDPOINT (Final Production Version) ---
+# --- /search_fts_test ENDPOINT (Final Version: ILIKE with Synonyms) ---
 @app.route('/search_fts_test', methods=['GET'])
 def search_fts_test():
-    logger.info("---- /search_fts_test: Request received ----")
+    logger.info("---- /search_fts_test: Request received (ILIKE with Synonyms) ----")
     search_term_from_user = request.args.get('name', '').strip()
     if not search_term_from_user:
         return jsonify({"error": "Search term is empty"}), 400
 
+    # Step 1: Normalize the user's search term first.
     normalized_for_pg = normalize_search_term_for_hybrid(search_term_from_user)
 
+    # Step 2: Apply synonyms if a match is found.
     if normalized_for_pg in SEARCH_TERM_SYNONYMS:
         original_term = normalized_for_pg
         normalized_for_pg = SEARCH_TERM_SYNONYMS[original_term]
@@ -238,7 +239,7 @@ def search_fts_test():
         return jsonify([])
 
     # Caching is re-enabled for production
-    cache_key = f"search_hybrid_prod_v2:{normalized_for_pg}" # Using v2 to ensure fresh cache
+    cache_key = f"search_ilike_prod_v1:{normalized_for_pg}" # New cache prefix for the new logic
     CACHE_TTL_SECONDS = 3600 * 4
     redis_conn = get_redis_client()
     if redis_conn:
@@ -252,72 +253,49 @@ def search_fts_test():
              logger.error(f"/search_fts_test: Redis GET error for key {cache_key}: {e}")
              sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
 
-    query_terms = normalized_for_pg.split()
-    if query_terms:
-        query_terms[-1] = query_terms[-1] + ':*'
-    fts_query_string = ' '.join(query_terms)
-
-    like_pattern = normalized_for_pg + '%'
-    params = (normalized_for_pg, fts_query_string, like_pattern) # 3-item tuple
-
+    # Step 3: Use the final normalized term in a simple ILIKE query against the normalized column.
+    search_pattern = f"%{normalized_for_pg}%"
+    
     query = """
-    WITH user_input AS (
-        SELECT
-            %s AS normalized_query,
-            %s AS fts_query_string,
-            %s AS like_pattern
-    )
     SELECT
         r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
         r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
-        r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description,
-        ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32) AS fts_score,
-        word_similarity(ui.normalized_query, r.dba_normalized_search) AS trgm_word_similarity,
-        similarity(r.dba_normalized_search, ui.normalized_query) AS trgm_direct_similarity
+        r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description
     FROM
         restaurants r
-        JOIN user_input ui ON TRUE
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
     WHERE
-        (r.dba_tsv @@ websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string))
-        OR
-        (word_similarity(ui.normalized_query, r.dba_normalized_search) > 0.25)
-        OR
-        (similarity(r.dba_normalized_search, ui.normalized_query) > 0.22)
+        r.dba_normalized_search ILIKE %s
     ORDER BY
-        -- Tier 1: Prioritize results where the normalized name starts with the user's query
-        CASE WHEN r.dba_normalized_search LIKE ui.like_pattern THEN 0 ELSE 1 END ASC,
-        -- Tier 2: Rank by a composite score
-        (COALESCE(ts_rank_cd(r.dba_tsv, websearch_to_tsquery('public.restaurant_search_config', ui.fts_query_string), 32), 0) * 1.2) +
-        (COALESCE(word_similarity(ui.normalized_query, r.dba_normalized_search), 0) * 1.0) +
-        (COALESCE(similarity(r.dba_normalized_search, ui.normalized_query), 0) * 0.2) DESC,
-        -- Tier 3: Finally, sort by name and date as tie-breakers
+        -- Simple alphabetical sort is best for a broad ILIKE search
         r.dba ASC,
         r.inspection_date DESC
-    LIMIT 75;
+    LIMIT 250; -- Increased limit for broader searches
     """
-
+    
+    params = (search_pattern,)
     db_results_raw = None
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute(query, params)
             db_results_raw = cursor.fetchall()
     except Exception as e:
-        logger.error(f"/search_fts_test: DB error for normalized input '{normalized_for_pg}': {e}", exc_info=True)
+        logger.error(f"/search_fts_test: DB error for ILIKE search '{normalized_for_pg}': {e}", exc_info=True)
         sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
         return jsonify({"error": "Database query failed"}), 500
 
     if not db_results_raw:
-        logger.info(f"/search_fts_test: No DB results for normalized input '{normalized_for_pg}', returning empty list.")
+        logger.info(f"/search_fts_test: No DB results for ILIKE search '{normalized_for_pg}', returning empty list.")
         return jsonify([])
 
+    # --- Standard Result Processing Logic ---
     db_results = [dict(row) for row in db_results_raw]
     restaurant_dict_hybrid = {}
     for row_dict in db_results:
         camis = row_dict.get('camis')
         if not camis: continue
         if camis not in restaurant_dict_hybrid:
-            restaurant_dict_hybrid[camis] = {k: v for k, v in row_dict.items() if k not in ['fts_score', 'trgm_word_similarity', 'trgm_direct_similarity', 'violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
+            restaurant_dict_hybrid[camis] = {k: v for k, v in row_dict.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
             restaurant_dict_hybrid[camis]['inspections'] = {}
         inspection_date_obj = row_dict.get('inspection_date')
         if inspection_date_obj:
@@ -328,10 +306,9 @@ def search_fts_test():
                 violation = {'violation_code': row_dict.get('violation_code'), 'violation_description': row_dict.get('violation_description')}
                 if violation not in restaurant_dict_hybrid[camis]['inspections'][inspection_date_str]['violations']:
                     restaurant_dict_hybrid[camis]['inspections'][inspection_date_str]['violations'].append(violation)
-
+    
     formatted_results = [dict(data, inspections=list(data['inspections'].values())) for data in restaurant_dict_hybrid.values()]
 
-    # Re-enabled caching
     if redis_conn:
         try:
             redis_conn.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
@@ -339,10 +316,8 @@ def search_fts_test():
         except Exception as e:
             logger.error(f"/search_fts_test: Redis SETEX error for key {cache_key}: {e}")
             sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
-
+            
     return jsonify(formatted_results)
-    
-
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
     logger.info("Received request for /recent")
