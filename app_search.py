@@ -151,77 +151,7 @@ def root():
 
 # --- ORIGINAL /search ENDPOINT ---
 @app.route('/search', methods=['GET'])
-def search_original():
-    logger.info("Received request for ORIGINAL /search endpoint")
-    name = request.args.get('name', '').strip()
-    if not name:
-        return jsonify({"error": "Search term is empty"}), 400
-    normalized_name_for_key = name.replace("’", "'").replace("‘", "'").lower().strip()
-    cache_key = f"search_orig:{normalized_name_for_key}"
-    CACHE_TTL_SECONDS = 3600 * 4
-    redis_conn = get_redis_client()
-    if redis_conn:
-        try:
-            cached_result_str = redis_conn.get(cache_key)
-            if cached_result_str:
-                logger.info(f"Cache hit for original search: '{name}'")
-                return jsonify(json.loads(cached_result_str))
-        except Exception as e:
-             logger.error(f"Original Search Redis GET error for key {cache_key}: {e}")
-             sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
-    name_with_periods, name_without_periods = original_sanitize_input(name)
-    if '.' not in name and len(name_without_periods) >= 2: name_with_added_periods = '.'.join(list(name_without_periods))
-    else: name_with_added_periods = name_with_periods
-    transformed_name = name_with_periods.replace("s", "'s"); transformed_name_no_periods = name_without_periods.replace("s", "'s"); transformed_with_added_periods = name_with_added_periods.replace("s", "'s")
-    query = """
-        SELECT r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone, 
-               r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade, 
-               r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description 
-        FROM restaurants r 
-        LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date 
-        WHERE r.dba ILIKE %s OR r.dba ILIKE %s OR r.dba ILIKE %s OR r.dba ILIKE %s OR r.dba ILIKE %s 
-        ORDER BY 
-            CASE WHEN UPPER(r.dba) = UPPER(%s) THEN 0 WHEN UPPER(r.dba) = UPPER(%s) THEN 1 
-                 WHEN UPPER(r.dba) LIKE UPPER(%s) THEN 2 WHEN UPPER(r.dba) LIKE UPPER(%s) THEN 3 
-                 WHEN UPPER(r.dba) LIKE UPPER(%s) THEN 4 ELSE 5 END, 
-            r.dba, r.inspection_date DESC
-    """
-    where_params = [ f"%{p}%" for p in [name_with_periods, transformed_name, name_without_periods, transformed_name_no_periods, transformed_with_added_periods] ]
-    order_params = [ name_with_periods, name_without_periods, f"{name_with_periods}%", f"{name_without_periods}%", f"{transformed_with_added_periods}%" ]
-    params = where_params + order_params
-    db_results_raw = None; columns = []
-    try:
-        with DatabaseConnection() as conn, conn.cursor() as cursor:
-            cursor.execute(query, params)
-            db_results_raw = cursor.fetchall()
-            if db_results_raw is not None: columns = [desc[0] for desc in cursor.description]
-    except Exception as e:
-        logger.error(f"Original Search DB error: {e}", exc_info=True)
-        sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
-        return jsonify({"error": "Database query failed"}), 500
-    if not db_results_raw: return jsonify([])
-    db_results = [dict(zip(columns, row)) for row in db_results_raw]
-    restaurant_dict = {}
-    for row_dict in db_results:
-        camis = row_dict.get('camis'); inspection_date_obj = row_dict.get('inspection_date')
-        if not camis: continue
-        inspection_date_str = inspection_date_obj.isoformat() if hasattr(inspection_date_obj, 'isoformat') else str(inspection_date_obj)
-        if camis not in restaurant_dict: restaurant_dict[camis] = {k: v for k, v in row_dict.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}; restaurant_dict[camis]['inspections'] = {}
-        inspections = restaurant_dict[camis]["inspections"]
-        if inspection_date_str and inspection_date_str not in inspections: inspections[inspection_date_str] = {'inspection_date': inspection_date_str, 'critical_flag': row_dict.get('critical_flag'), 'grade': row_dict.get('grade'), 'inspection_type': row_dict.get('inspection_type'), 'violations': []}
-        if inspection_date_str and row_dict.get('violation_code'):
-            violation = {'violation_code': row_dict.get('violation_code'), 'violation_description': row_dict.get('violation_description')}
-            if violation not in inspections[inspection_date_str]["violations"]: inspections[inspection_date_str]["violations"].append(violation)
-    formatted_results = [dict(data, inspections=list(data['inspections'].values())) for data in restaurant_dict.values()]
-    if redis_conn:
-        try: redis_conn.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(formatted_results, default=str))
-        except Exception as e: logger.error(f"Original Search Redis SETEX error: {e}"); sentry_sdk.capture_exception(e) if SentryConfig.SENTRY_DSN else None
-    return jsonify(formatted_results)
-
-# --- /search_fts_test ENDPOINT (Final Upgraded Version: ILIKE + Trigrams for Typos) ---
-# --- /search_fts_test ENDPOINT (Final Production Version with True Pagination) ---
-@app.route('/search_fts_test', methods=['GET'])
-def search_fts_test():
+def search():
     logger.info("---- /search_fts_test: Request received (Final with True Pagination) ----")
     search_term_from_user = request.args.get('name', '').strip()
     
