@@ -1,4 +1,4 @@
-# app_search.py - v2 - Corrected Filter and Sort Logic
+# app_search.py - v3 - Crash Fix for SyntaxError
 
 # Standard library imports
 import os
@@ -33,15 +33,18 @@ except ImportError:
 # --- Basic Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 logger = logging.getLogger(__name__)
-SEARCH_TERM_SYNONYMS = {'pjclarkes': 'p j clarkes', 'xian': 'xi an'} # Add your other synonyms here
+SEARCH_TERM_SYNONYMS = {'pjclarkes': 'p j clarkes', 'xian': 'xi an'}
 app = Flask(__name__)
 CORS(app)
 
-# --- Normalization Function (Unchanged) ---
+# --- Normalization Function (Corrected) ---
 def normalize_search_term_for_hybrid(text):
     if not isinstance(text, str): return ''
     normalized_text = text.lower().replace('&', ' and ')
-    accent_map = { 'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö':o', 'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ç': 'c', 'ñ': 'n' }
+    
+    # ##### THIS DICTIONARY IS NOW CORRECTED #####
+    accent_map = { 'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö':'o', 'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ç': 'c', 'ñ': 'n' }
+    
     for accented, unaccented in accent_map.items():
         normalized_text = normalized_text.replace(accented, unaccented)
     normalized_text = re.sub(r"[']", "", normalized_text)
@@ -51,7 +54,7 @@ def normalize_search_term_for_hybrid(text):
     return normalized_text.strip()
 
 
-# --- ##### REWRITTEN AND CORRECTED SEARCH ENDPOINT ##### ---
+# --- Search Endpoint ---
 @app.route('/search', methods=['GET'])
 def search():
     # 1. Get All Parameters
@@ -84,12 +87,9 @@ def search():
             logger.error(f"Redis GET error: {e}")
 
     # 4. Dynamically Build the SQL Query and Parameters
-    
-    # Base of the query finds all restaurants matching the search term
     base_query_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
     params = [f"%{normalized_search}%", normalized_search]
 
-    # Add grade and boro filters to the conditions if they exist
     if grade_filter and grade_filter in ['A', 'B', 'C']:
         base_query_conditions.append("grade = %s")
         params.append(grade_filter)
@@ -97,10 +97,8 @@ def search():
         base_query_conditions.append("boro = %s")
         params.append(boro_filter.upper())
 
-    # Combine all conditions into a single WHERE clause
     where_clause = " AND ".join(base_query_conditions)
     
-    # Determine the ORDER BY clause
     order_by_clause = ""
     relevance_order_params = []
     if sort_by == 'name_asc':
@@ -114,13 +112,10 @@ def search():
         """
         relevance_order_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
-    # Add pagination parameters
     limit = per_page
     offset = (page - 1) * per_page
     pagination_params = [limit, offset]
 
-    # This simplified query first finds the correct page of unique restaurants,
-    # THEN joins to get all their associated data. This is more efficient and correct.
     full_query = f"""
         WITH paginated_camis AS (
             SELECT camis
@@ -140,7 +135,6 @@ def search():
         ORDER BY {order_by_clause}, r.inspection_date DESC
     """
     
-    # Combine all parameters in the correct order for the final query
     final_params = params + relevance_order_params + pagination_params + relevance_order_params
     
     # 5. Execute Query and Process Results
@@ -154,7 +148,6 @@ def search():
     
     if not db_results_raw: return jsonify([])
 
-    # Group results by restaurant and inspection (Unchanged)
     restaurant_dict = {}
     for row in db_results_raw:
         camis = row['camis']
@@ -183,13 +176,11 @@ def search():
 
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
-    logger.info("Received request for /recent")
-    # Your logic for this endpoint
-    return jsonify([]) # Placeholder
+    # ... Your logic here
+    return jsonify([])
 
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
-    logger.info("Received request for /trigger-update")
     if not update_logic_imported:
         return jsonify({"status": "error", "message": "Update logic unavailable."}), 500
     provided_key = request.headers.get('X-Update-Secret')
@@ -212,5 +203,4 @@ def internal_server_error_handler(error):
 if __name__ == "__main__":
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", 8080))
-    debug_mode = "true" in os.environ.get("DEBUG", "").lower()
-    app.run(host=host, port=port, debug=debug_mode)
+    app.run(host=host, port=port)
