@@ -1,4 +1,4 @@
-# app_search.py - v5 - Final Simplified & Corrected Query
+# app_search.py - v6 - Final Corrected and Simplified Query
 
 # Standard library imports
 import os
@@ -74,7 +74,7 @@ def search():
     if not normalized_search: return jsonify([])
 
     # 3. Build Cache Key
-    cache_key = f"search_v7_final:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
+    cache_key = f"search_v8_final:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -85,56 +85,73 @@ def search():
 
     # 4. Dynamically Build the SQL Query and Parameters
     
-    # This simplified query first finds the correct page of unique restaurants,
-    # THEN joins to get all their associated data. This is more efficient and correct.
+    # This simplified query first finds the unique restaurant IDs that match all criteria,
+    # then gets all data for that paginated list of restaurants.
+    
     query = """
-        WITH RelevantRestaurants AS (
-            SELECT
+        WITH unique_restaurants AS (
+            SELECT DISTINCT ON (camis)
                 camis,
                 dba,
                 dba_normalized_search,
-                -- Get the latest inspection grade for each restaurant for filtering purposes
-                FIRST_VALUE(grade) OVER(PARTITION BY camis ORDER BY inspection_date DESC) as latest_grade
+                grade,
+                boro
             FROM restaurants
+            ORDER BY camis, inspection_date DESC
+        ),
+        paginated_camis AS (
+            SELECT camis
+            FROM unique_restaurants
             WHERE
                 (dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)
+                AND (%s IS NULL OR grade = %s)
                 AND (%s IS NULL OR boro = %s)
-        ),
-        FilteredRestaurants AS (
-            SELECT DISTINCT camis, dba, dba_normalized_search
-            FROM RelevantRestaurants
-            WHERE (%s IS NULL OR latest_grade = %s)
+            ORDER BY
+                CASE WHEN %s = 'name_asc' THEN dba END ASC,
+                CASE WHEN %s = 'name_desc' THEN dba END DESC,
+                CASE WHEN %s = 'relevance' THEN
+                    (CASE WHEN dba_normalized_search = %s THEN 0
+                          WHEN dba_normalized_search ILIKE %s THEN 1
+                          ELSE 2 END)
+                END,
+                CASE WHEN %s = 'relevance' THEN similarity(dba_normalized_search, %s) END DESC
+            LIMIT %s OFFSET %s
         )
         SELECT
-            r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
+            pc.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
             r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
             r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description
-        FROM FilteredRestaurants fr
-        JOIN restaurants r ON fr.camis = r.camis
+        FROM paginated_camis pc
+        JOIN restaurants r ON pc.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
         ORDER BY
-            CASE WHEN %s = 'name_asc' THEN r.dba END ASC,
-            CASE WHEN %s = 'name_desc' THEN r.dba END DESC,
-            CASE WHEN %s = 'relevance' THEN
-                (CASE WHEN r.dba_normalized_search = %s THEN 0
-                      WHEN r.dba_normalized_search ILIKE %s THEN 1
-                      ELSE 2 END)
-            END,
-            CASE WHEN %s = 'relevance' THEN similarity(r.dba_normalized_search, %s) END DESC,
-            r.inspection_date DESC
-        LIMIT %s OFFSET %s;
+            (SELECT 
+                CASE WHEN %s = 'name_asc' THEN r.dba END ASC,
+                CASE WHEN %s = 'name_desc' THEN r.dba END DESC,
+                CASE WHEN %s = 'relevance' THEN
+                    (CASE WHEN r.dba_normalized_search = %s THEN 0
+                          WHEN r.dba_normalized_search ILIKE %s THEN 1
+                          ELSE 2 END)
+                END,
+                CASE WHEN %s = 'relevance' THEN similarity(r.dba_normalized_search, %s) END DESC
+            ),
+            r.inspection_date DESC;
     """
     
     # 5. Assemble the parameters in the correct order for the query
     params = (
         f"%{normalized_search}%", normalized_search,
-        boro_filter, boro_filter,
         grade_filter, grade_filter,
+        boro_filter, boro_filter,
         sort_by,
         sort_by,
         sort_by, normalized_search, f"{normalized_search}%",
         sort_by, normalized_search,
-        per_page, (page - 1) * per_page
+        per_page, (page - 1) * per_page,
+        sort_by, # Start of final order by
+        sort_by,
+        sort_by, normalized_search, f"{normalized_search}%",
+        sort_by, normalized_search
     )
     
     # 6. Execute Query and Process Results
@@ -154,33 +171,17 @@ def search():
         camis = row['camis']
         if not camis: continue
         if camis not in restaurant_dict:
-            # We need to manually construct the main restaurant object to avoid duplicate inspection data
-            restaurant_info = {
-                'camis': camis, 'dba': row['dba'], 'boro': row['boro'], 'building': row['building'],
-                'street': row['street'], 'zipcode': row['zipcode'], 'phone': row['phone'],
-                'latitude': row['latitude'], 'longitude': row['longitude'],
-                'cuisine_description': row['cuisine_description'], 'inspections': {}
-            }
-            restaurant_dict[camis] = restaurant_info
-
+            restaurant_dict[camis] = {k: v for k, v in row.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
+            restaurant_dict[camis]['inspections'] = {}
         inspection_date_str = row['inspection_date'].isoformat()
         if inspection_date_str not in restaurant_dict[camis]['inspections']:
-            restaurant_dict[camis]['inspections'][inspection_date_str] = {
-                'inspection_date': inspection_date_str, 'critical_flag': row['critical_flag'],
-                'grade': row['grade'], 'inspection_type': row['inspection_type'], 'violations': []
-            }
-        
+            restaurant_dict[camis]['inspections'][inspection_date_str] = {'inspection_date': inspection_date_str, 'critical_flag': row['critical_flag'], 'grade': row['grade'], 'inspection_type': row['inspection_type'], 'violations': []}
         if row['violation_code']:
             violation = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
-            # Avoid adding duplicate violations
             if violation not in restaurant_dict[camis]['inspections'][inspection_date_str]['violations']:
                 restaurant_dict[camis]['inspections'][inspection_date_str]['violations'].append(violation)
     
-    # Final formatting to convert the inspections dict to a list
-    formatted_results = []
-    for camis, data in restaurant_dict.items():
-        data['inspections'] = list(data['inspections'].values())
-        formatted_results.append(data)
+    formatted_results = [dict(data, inspections=list(data['inspections'].values())) for data in restaurant_dict.values()]
     
     if redis_conn:
         try: redis_conn.setex(cache_key, 3600, json.dumps(formatted_results, default=str))
@@ -193,7 +194,7 @@ def search():
 
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
-    return jsonify([]) # Placeholder
+    return jsonify([])
 
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
