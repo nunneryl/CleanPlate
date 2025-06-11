@@ -84,40 +84,41 @@ def search():
             logger.error(f"Redis GET error: {e}")
 
     # 4. Dynamically Build the SQL Query and Parameters
-    
-    # This query first finds the unique restaurant IDs (camis) that match all the criteria,
-    # then gets all data for those restaurants. This is the most robust way to handle pagination with filters.
-    
     query = """
         WITH FilteredRestaurants AS (
             SELECT
                 camis,
                 dba,
-                dba_normalized_search
+                dba_normalized_search,
+                -- We need the latest grade for each unique restaurant (camis) for filtering
+                MAX(inspection_date) as last_inspection_date
             FROM restaurants
             WHERE
                 (dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)
-                AND (%s IS NULL OR grade = %s)
                 AND (%s IS NULL OR boro = %s)
             GROUP BY camis, dba, dba_normalized_search
         ),
+        GradedRestaurants AS (
+            SELECT
+                fr.camis,
+                fr.dba,
+                fr.dba_normalized_search
+            FROM FilteredRestaurants fr
+            JOIN restaurants r ON fr.camis = r.camis AND fr.last_inspection_date = r.inspection_date
+            WHERE (%s IS NULL OR r.grade = %s)
+        ),
         PaginatedRestaurants AS (
             SELECT camis
-            FROM FilteredRestaurants
+            FROM GradedRestaurants
             ORDER BY
-                CASE
-                    WHEN %s = 'name_asc' THEN dba END ASC,
-                CASE
-                    WHEN %s = 'name_desc' THEN dba END DESC,
-                CASE
-                    WHEN %s = 'relevance' THEN
-                        (CASE WHEN dba_normalized_search = %s THEN 0
-                              WHEN dba_normalized_search ILIKE %s THEN 1
-                              ELSE 2 END)
-                    END,
-                CASE
-                    WHEN %s = 'relevance' THEN similarity(dba_normalized_search, %s)
-                END DESC
+                CASE WHEN %s = 'name_asc' THEN dba END ASC,
+                CASE WHEN %s = 'name_desc' THEN dba END DESC,
+                CASE WHEN %s = 'relevance' THEN
+                    (CASE WHEN dba_normalized_search = %s THEN 0
+                          WHEN dba_normalized_search ILIKE %s THEN 1
+                          ELSE 2 END)
+                END,
+                CASE WHEN %s = 'relevance' THEN similarity(dba_normalized_search, %s) END DESC
             LIMIT %s OFFSET %s
         )
         SELECT
@@ -128,27 +129,22 @@ def search():
         JOIN restaurants r ON pr.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
         ORDER BY
-                CASE
-                    WHEN %s = 'name_asc' THEN r.dba END ASC,
-                CASE
-                    WHEN %s = 'name_desc' THEN r.dba END DESC,
-                CASE
-                    WHEN %s = 'relevance' THEN
-                        (CASE WHEN r.dba_normalized_search = %s THEN 0
-                              WHEN r.dba_normalized_search ILIKE %s THEN 1
-                              ELSE 2 END)
-                    END,
-                CASE
-                    WHEN %s = 'relevance' THEN similarity(r.dba_normalized_search, %s)
-                END DESC,
+                CASE WHEN %s = 'name_asc' THEN r.dba END ASC,
+                CASE WHEN %s = 'name_desc' THEN r.dba END DESC,
+                CASE WHEN %s = 'relevance' THEN
+                    (CASE WHEN r.dba_normalized_search = %s THEN 0
+                          WHEN r.dba_normalized_search ILIKE %s THEN 1
+                          ELSE 2 END)
+                END,
+                CASE WHEN %s = 'relevance' THEN similarity(r.dba_normalized_search, %s) END DESC,
             r.inspection_date DESC;
     """
     
     # 5. Assemble the parameters in the correct order for the query
     params = (
         f"%{normalized_search}%", normalized_search,
-        grade_filter, grade_filter,
         boro_filter, boro_filter,
+        grade_filter, grade_filter,
         sort_by,
         sort_by,
         sort_by, normalized_search, f"{normalized_search}%",
@@ -200,7 +196,8 @@ def search():
 
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
-    return jsonify([]) # Placeholder
+    # ... Your logic here
+    return jsonify([])
 
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
@@ -220,7 +217,7 @@ def not_found_error_handler(error):
 
 @app.errorhandler(500)
 def internal_server_error_handler(error):
-    logger.error(f"500 Error: {error}", exc_info=True)
+    logger.error(f"500 Error: {error}", exc_info=T_rue)
     return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
