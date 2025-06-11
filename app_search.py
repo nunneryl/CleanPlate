@@ -1,4 +1,4 @@
-# app_search.py - v3 - Crash Fix for SyntaxError
+# app_search.py - v4 - Final Corrected Query Logic
 
 # Standard library imports
 import os
@@ -37,14 +37,11 @@ SEARCH_TERM_SYNONYMS = {'pjclarkes': 'p j clarkes', 'xian': 'xi an'}
 app = Flask(__name__)
 CORS(app)
 
-# --- Normalization Function (Corrected) ---
+# --- Normalization Function (Unchanged) ---
 def normalize_search_term_for_hybrid(text):
     if not isinstance(text, str): return ''
     normalized_text = text.lower().replace('&', ' and ')
-    
-    # ##### THIS DICTIONARY IS NOW CORRECTED #####
     accent_map = { 'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö':'o', 'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ç': 'c', 'ñ': 'n' }
-    
     for accented, unaccented in accent_map.items():
         normalized_text = normalized_text.replace(accented, unaccented)
     normalized_text = re.sub(r"[']", "", normalized_text)
@@ -54,7 +51,7 @@ def normalize_search_term_for_hybrid(text):
     return normalized_text.strip()
 
 
-# --- Search Endpoint ---
+# --- ##### REWRITTEN AND CORRECTED SEARCH ENDPOINT ##### ---
 @app.route('/search', methods=['GET'])
 def search():
     # 1. Get All Parameters
@@ -77,7 +74,7 @@ def search():
     if not normalized_search: return jsonify([])
 
     # 3. Build Cache Key
-    cache_key = f"search_v5_correct_filter:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
+    cache_key = f"search_v6_final_fix:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -87,67 +84,94 @@ def search():
             logger.error(f"Redis GET error: {e}")
 
     # 4. Dynamically Build the SQL Query and Parameters
-    base_query_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
-    params = [f"%{normalized_search}%", normalized_search]
-
-    if grade_filter and grade_filter in ['A', 'B', 'C']:
-        base_query_conditions.append("grade = %s")
-        params.append(grade_filter)
-    if boro_filter:
-        base_query_conditions.append("boro = %s")
-        params.append(boro_filter.upper())
-
-    where_clause = " AND ".join(base_query_conditions)
     
-    order_by_clause = ""
-    relevance_order_params = []
-    if sort_by == 'name_asc':
-        order_by_clause = "dba ASC"
-    elif sort_by == 'name_desc':
-        order_by_clause = "dba DESC"
-    else: # Default 'relevance' sort
-        order_by_clause = """
-            CASE WHEN dba_normalized_search = %s THEN 0 WHEN dba_normalized_search ILIKE %s THEN 1 ELSE 2 END,
-            similarity(dba_normalized_search, %s) DESC, length(dba_normalized_search), dba ASC
-        """
-        relevance_order_params = [normalized_search, f"{normalized_search}%", normalized_search]
-
-    limit = per_page
-    offset = (page - 1) * per_page
-    pagination_params = [limit, offset]
-
-    full_query = f"""
-        WITH paginated_camis AS (
-            SELECT camis
+    # This query first finds the unique restaurant IDs (camis) that match all the criteria,
+    # then gets all data for those restaurants. This is the most robust way to handle pagination with filters.
+    
+    query = """
+        WITH FilteredRestaurants AS (
+            SELECT
+                camis,
+                dba,
+                dba_normalized_search
             FROM restaurants
-            WHERE {where_clause}
+            WHERE
+                (dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)
+                AND (%s IS NULL OR grade = %s)
+                AND (%s IS NULL OR boro = %s)
             GROUP BY camis, dba, dba_normalized_search
-            ORDER BY {order_by_clause}
+        ),
+        PaginatedRestaurants AS (
+            SELECT camis
+            FROM FilteredRestaurants
+            ORDER BY
+                CASE
+                    WHEN %s = 'name_asc' THEN dba END ASC,
+                CASE
+                    WHEN %s = 'name_desc' THEN dba END DESC,
+                CASE
+                    WHEN %s = 'relevance' THEN
+                        (CASE WHEN dba_normalized_search = %s THEN 0
+                              WHEN dba_normalized_search ILIKE %s THEN 1
+                              ELSE 2 END)
+                    END,
+                CASE
+                    WHEN %s = 'relevance' THEN similarity(dba_normalized_search, %s)
+                END DESC
             LIMIT %s OFFSET %s
         )
         SELECT
-            pc.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
+            pr.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
             r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
             r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description
-        FROM paginated_camis pc
-        JOIN restaurants r ON pc.camis = r.camis
+        FROM PaginatedRestaurants pr
+        JOIN restaurants r ON pr.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        ORDER BY {order_by_clause}, r.inspection_date DESC
+        ORDER BY
+                CASE
+                    WHEN %s = 'name_asc' THEN r.dba END ASC,
+                CASE
+                    WHEN %s = 'name_desc' THEN r.dba END DESC,
+                CASE
+                    WHEN %s = 'relevance' THEN
+                        (CASE WHEN r.dba_normalized_search = %s THEN 0
+                              WHEN r.dba_normalized_search ILIKE %s THEN 1
+                              ELSE 2 END)
+                    END,
+                CASE
+                    WHEN %s = 'relevance' THEN similarity(r.dba_normalized_search, %s)
+                END DESC,
+            r.inspection_date DESC;
     """
     
-    final_params = params + relevance_order_params + pagination_params + relevance_order_params
+    # 5. Assemble the parameters in the correct order for the query
+    params = (
+        f"%{normalized_search}%", normalized_search,
+        grade_filter, grade_filter,
+        boro_filter, boro_filter,
+        sort_by,
+        sort_by,
+        sort_by, normalized_search, f"{normalized_search}%",
+        sort_by, normalized_search,
+        per_page, (page - 1) * per_page,
+        sort_by,
+        sort_by,
+        sort_by, normalized_search, f"{normalized_search}%",
+        sort_by, normalized_search
+    )
     
-    # 5. Execute Query and Process Results
+    # 6. Execute Query and Process Results
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute(full_query, tuple(final_params))
+            cursor.execute(query, params)
             db_results_raw = cursor.fetchall()
     except Exception as e:
-        logger.error(f"DB error for search '{normalized_search}': {e}", exc_info=True)
+        logger.error(f"DB error for search '{normalized_search}' with params {params}: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
     
     if not db_results_raw: return jsonify([])
 
+    # Group results by restaurant and inspection (Unchanged)
     restaurant_dict = {}
     for row in db_results_raw:
         camis = row['camis']
@@ -176,8 +200,7 @@ def search():
 
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
-    # ... Your logic here
-    return jsonify([])
+    return jsonify([]) # Placeholder
 
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
