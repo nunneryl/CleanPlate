@@ -1,4 +1,4 @@
-# app_search.py - Complete file with Filter and Sort Capabilities
+# app_search.py - v2 - Corrected Filter and Sort Logic
 
 # Standard library imports
 import os
@@ -18,7 +18,7 @@ import psycopg2.extras
 # Local application imports
 try:
     from db_manager import DatabaseConnection, get_redis_client
-    from config import APIConfig, SentryConfig
+    from config import APIConfig
     from update_database import run_database_update
     update_logic_imported = True
 except ImportError:
@@ -26,16 +26,13 @@ except ImportError:
         def __enter__(self): return None
         def __exit__(self, t, v, tb): pass
     def get_redis_client(): return None
-    class APIConfig: DEBUG = False; UPDATE_SECRET_KEY = "dummy"; HOST = "0.0.0.0"; PORT = 8080
-    class SentryConfig: SENTRY_DSN = None
+    class APIConfig: UPDATE_SECRET_KEY = "dummy"; HOST="0.0.0.0"; PORT=8080
     update_logic_imported = False
     def run_database_update(days_back=5): pass
 
-# --- Basic Setup (Logging, Sentry, Flask App) ---
+# --- Basic Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 logger = logging.getLogger(__name__)
-# Sentry, etc. can be added here if needed.
-
 SEARCH_TERM_SYNONYMS = {'pjclarkes': 'p j clarkes', 'xian': 'xi an'} # Add your other synonyms here
 app = Flask(__name__)
 CORS(app)
@@ -44,7 +41,7 @@ CORS(app)
 def normalize_search_term_for_hybrid(text):
     if not isinstance(text, str): return ''
     normalized_text = text.lower().replace('&', ' and ')
-    accent_map = { 'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o', 'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ç': 'c', 'ñ': 'n' }
+    accent_map = { 'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö':o', 'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ç': 'c', 'ñ': 'n' }
     for accented, unaccented in accent_map.items():
         normalized_text = normalized_text.replace(accented, unaccented)
     normalized_text = re.sub(r"[']", "", normalized_text)
@@ -53,36 +50,31 @@ def normalize_search_term_for_hybrid(text):
     normalized_text = re.sub(r"\s+", " ", normalized_text)
     return normalized_text.strip()
 
-# --- API Routes ---
 
-@app.route('/', methods=['GET'])
-def root():
-    return jsonify({"status": "ok", "message": "API is running"})
-
+# --- ##### REWRITTEN AND CORRECTED SEARCH ENDPOINT ##### ---
 @app.route('/search', methods=['GET'])
 def search():
-    # Get Search and Pagination Parameters
+    # 1. Get All Parameters
     search_term = request.args.get('name', '').strip()
+    grade_filter = request.args.get('grade', None)
+    boro_filter = request.args.get('boro', None)
+    sort_by = request.args.get('sort', 'relevance')
     try:
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 25))
     except (ValueError, TypeError):
         page, per_page = 1, 25
-    
-    # Get NEW Filter and Sort Parameters
-    grade_filter = request.args.get('grade', None)
-    boro_filter = request.args.get('boro', None)
-    sort_by = request.args.get('sort', 'relevance')
 
     if not search_term: return jsonify([])
 
-    # Normalization and Cache Key
+    # 2. Normalize and Prepare Search Terms
     normalized_search = normalize_search_term_for_hybrid(search_term)
     if normalized_search in SEARCH_TERM_SYNONYMS:
         normalized_search = SEARCH_TERM_SYNONYMS[normalized_search]
     if not normalized_search: return jsonify([])
 
-    cache_key = f"search_v4:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
+    # 3. Build Cache Key
+    cache_key = f"search_v5_correct_filter:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -91,23 +83,26 @@ def search():
         except Exception as e:
             logger.error(f"Redis GET error: {e}")
 
-    # Build Dynamic SQL Query
-    params = []
-    where_clauses = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
-    params.extend([f"%{normalized_search}%", normalized_search])
+    # 4. Dynamically Build the SQL Query and Parameters
+    
+    # Base of the query finds all restaurants matching the search term
+    base_query_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
+    params = [f"%{normalized_search}%", normalized_search]
 
+    # Add grade and boro filters to the conditions if they exist
     if grade_filter and grade_filter in ['A', 'B', 'C']:
-        where_clauses.append("r_full.grade = %s") # Filter on the joined table
+        base_query_conditions.append("grade = %s")
         params.append(grade_filter)
-
     if boro_filter:
-        where_clauses.append("r_full.boro = %s")
+        base_query_conditions.append("boro = %s")
         params.append(boro_filter.upper())
 
-    where_string = " AND ".join(where_clauses)
+    # Combine all conditions into a single WHERE clause
+    where_clause = " AND ".join(base_query_conditions)
     
-    # Determine ORDER BY clause
+    # Determine the ORDER BY clause
     order_by_clause = ""
+    relevance_order_params = []
     if sort_by == 'name_asc':
         order_by_clause = "dba ASC"
     elif sort_by == 'name_desc':
@@ -117,45 +112,38 @@ def search():
             CASE WHEN dba_normalized_search = %s THEN 0 WHEN dba_normalized_search ILIKE %s THEN 1 ELSE 2 END,
             similarity(dba_normalized_search, %s) DESC, length(dba_normalized_search), dba ASC
         """
-        params.extend([normalized_search, f"{normalized_search}%", normalized_search])
+        relevance_order_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
+    # Add pagination parameters
     limit = per_page
     offset = (page - 1) * per_page
-    
-    # Construct the Full Query
+    pagination_params = [limit, offset]
+
+    # This simplified query first finds the correct page of unique restaurants,
+    # THEN joins to get all their associated data. This is more efficient and correct.
     full_query = f"""
-    WITH PaginatedRestaurants AS (
-        SELECT camis
-        FROM restaurants
-        WHERE (dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)
-        GROUP BY camis, dba, dba_normalized_search
-        ORDER BY {order_by_clause}
-        LIMIT %s OFFSET %s
-    )
-    SELECT
-        pr.camis, r_full.dba, r_full.boro, r_full.building, r_full.street, r_full.zipcode, r_full.phone,
-        r_full.latitude, r_full.longitude, r_full.inspection_date, r_full.critical_flag, r_full.grade,
-        r_full.inspection_type, v.violation_code, v.violation_description, r_full.cuisine_description
-    FROM PaginatedRestaurants pr
-    JOIN restaurants r_full ON pr.camis = r_full.camis
-    LEFT JOIN violations v ON r_full.camis = v.camis AND r_full.inspection_date = v.inspection_date
-    WHERE {where_string}
-    ORDER BY {order_by_clause}, r_full.inspection_date DESC;
+        WITH paginated_camis AS (
+            SELECT camis
+            FROM restaurants
+            WHERE {where_clause}
+            GROUP BY camis, dba, dba_normalized_search
+            ORDER BY {order_by_clause}
+            LIMIT %s OFFSET %s
+        )
+        SELECT
+            pc.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
+            r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
+            r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description
+        FROM paginated_camis pc
+        JOIN restaurants r ON pc.camis = r.camis
+        LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
+        ORDER BY {order_by_clause}, r.inspection_date DESC
     """
     
-    # Adjust params for the new query structure
-    relevance_params = []
-    if sort_by == 'relevance':
-        relevance_params = [normalized_search, f"{normalized_search}%", normalized_search]
-
-    final_params = [f"%{normalized_search}%", normalized_search] + relevance_params + [limit, offset] + [f"%{normalized_search}%", normalized_search]
-    if grade_filter and grade_filter in ['A', 'B', 'C']:
-        final_params.append(grade_filter)
-    if boro_filter:
-        final_params.append(boro_filter.upper())
-    final_params.extend(relevance_params)
-
-    # Execute Query and Process Results
+    # Combine all parameters in the correct order for the final query
+    final_params = params + relevance_order_params + pagination_params + relevance_order_params
+    
+    # 5. Execute Query and Process Results
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute(full_query, tuple(final_params))
@@ -166,9 +154,11 @@ def search():
     
     if not db_results_raw: return jsonify([])
 
+    # Group results by restaurant and inspection (Unchanged)
     restaurant_dict = {}
     for row in db_results_raw:
         camis = row['camis']
+        if not camis: continue
         if camis not in restaurant_dict:
             restaurant_dict[camis] = {k: v for k, v in row.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
             restaurant_dict[camis]['inspections'] = {}
@@ -188,12 +178,13 @@ def search():
             
     return jsonify(formatted_results)
 
+
 # --- Other Endpoints ---
 
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
     logger.info("Received request for /recent")
-    # ... (Your existing logic for this endpoint)
+    # Your logic for this endpoint
     return jsonify([]) # Placeholder
 
 @app.route('/trigger-update', methods=['POST'])
@@ -209,7 +200,6 @@ def trigger_update():
     return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
 
 # --- Error Handlers ---
-
 @app.errorhandler(404)
 def not_found_error_handler(error):
     return jsonify({"error": "Not found"}), 404
