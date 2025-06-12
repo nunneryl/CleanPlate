@@ -1,4 +1,4 @@
-# app_search.py - v7 - Final, Robust, and Simplified
+# app_search.py - v8 - Corrected SQL Syntax
 
 # Standard library imports
 import os
@@ -78,7 +78,7 @@ def search():
         return jsonify([])
 
     # 3. Build Cache Key
-    cache_key = f"search_v9_final:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
+    cache_key = f"search_v10_final:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -89,98 +89,85 @@ def search():
             logger.error(f"Redis GET error: {e}")
 
     # 4. Dynamically Build SQL Query and Parameters
-    # This approach is safer and more maintainable. We build a list of WHERE clauses
-    # and a list of parameters separately, preventing SQL injection.
+    params = []
+    where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
+    params.extend([f"%{normalized_search}%", normalized_search])
 
-    # Base filtering for the search term is always active.
-    where_conditions = ["(latest.dba_normalized_search ILIKE %s OR similarity(latest.dba_normalized_search, %s) > 0.4)"]
-    params = [f"%{normalized_search}%", normalized_search]
-
-    # Add optional filters if they are provided
     if grade_filter:
-        where_conditions.append("latest.grade = %s")
+        where_conditions.append("grade = %s")
         params.append(grade_filter)
 
     if boro_filter:
-        where_conditions.append("latest.boro = %s")
+        where_conditions.append("boro = %s")
         params.append(boro_filter)
 
-    # Combine all WHERE conditions with "AND"
     where_clause = " AND ".join(where_conditions)
 
-    # Dynamically set the ORDER BY clause based on the sort parameter
     order_by_clause = ""
+    order_by_params = []
     if sort_by == 'name_asc':
-        order_by_clause = "ORDER BY latest.dba ASC"
+        order_by_clause = "ORDER BY dba ASC"
     elif sort_by == 'name_desc':
-        order_by_clause = "ORDER BY latest.dba DESC"
-    else:  # Default to 'relevance'
+        order_by_clause = "ORDER BY dba DESC"
+    else:
         order_by_clause = """
         ORDER BY
             CASE
-                WHEN latest.dba_normalized_search = %s THEN 0
-                WHEN latest.dba_normalized_search LIKE %s THEN 1
+                WHEN dba_normalized_search = %s THEN 0
+                WHEN dba_normalized_search LIKE %s THEN 1
                 ELSE 2
             END,
-            similarity(latest.dba_normalized_search, %s) DESC
+            similarity(dba_normalized_search, %s) DESC
         """
-        # Add parameters for the relevance sorting
-        params.extend([normalized_search, f"{normalized_search}%", normalized_search])
+        order_by_params.extend([normalized_search, f"{normalized_search}%", normalized_search])
 
-    # Add pagination parameters
-    params.extend([per_page, (page - 1) * per_page])
-    
-    # This is the final, simplified, and robust query structure.
-    # It uses a subquery to find, filter, and paginate the unique restaurants first,
-    # then joins that small list back to the main tables to get all details.
+    pagination_params = [per_page, (page - 1) * per_page]
+
+    # This CTE-based query is cleaner and less prone to syntax errors.
     final_query = f"""
+        WITH latest_restaurants AS (
+            -- Step 1: Find the most recent inspection for each restaurant.
+            SELECT DISTINCT ON (camis) *
+            FROM restaurants
+            ORDER BY camis, inspection_date DESC
+        ),
+        paginated_camis AS (
+            -- Step 2: Filter, sort, and paginate the unique restaurants.
+            SELECT camis, dba, dba_normalized_search
+            FROM latest_restaurants
+            WHERE {where_clause}
+            {order_by_clause}
+            LIMIT %s OFFSET %s
+        )
+        -- Step 3: Join the final list of restaurant IDs back to the main tables to fetch all details.
         SELECT
             r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
             r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
             r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description
-        FROM (
-            -- Step 1: Find the most recent inspection for each restaurant.
-            SELECT DISTINCT ON (camis)
-                camis, dba, dba_normalized_search, grade, boro
-            FROM restaurants
-            ORDER BY camis, inspection_date DESC
-        ) AS latest
-        -- Step 2: Filter, sort, and paginate the unique restaurants.
-        WHERE {where_clause}
-        {order_by_clause}
-        LIMIT %s OFFSET %s
-        -- Step 3: Join the final list back to the main tables to get all data.
-        ) AS paginated_restaurants
-        JOIN restaurants r ON paginated_restaurants.camis = r.camis
+        FROM paginated_camis pc
+        JOIN restaurants r ON pc.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        -- Step 4: Final ordering must re-apply the sort to the full result set.
-        {order_by_clause.replace('latest.', 'r.')}, r.inspection_date DESC;
+        -- Step 4: Final ordering must match the pagination order to ensure consistency.
+        -- This re-uses the same ordering logic, but on the final joined data.
+        {order_by_clause.replace('dba', 'pc.dba').replace('dba_normalized_search', 'pc.dba_normalized_search')}, r.inspection_date DESC;
     """
-
+    
     # 5. Execute Query and Process Results
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            # Note: The 'params' list now contains parameters for WHERE, ORDER BY (if relevance), and LIMIT/OFFSET.
-            # We need to add the final ORDER BY params again for the outer query.
-            final_order_params = []
-            if sort_by == 'relevance':
-                final_order_params = [normalized_search, f"{normalized_search}%", normalized_search]
-            
-            # The complete, final parameter list in the correct order for the query
-            cursor.execute(final_query, params + final_order_params)
+            # Assemble the final parameters list in the correct order.
+            # It includes params for WHERE, ORDER BY (in CTE), pagination, and the final ORDER BY.
+            final_params = params + order_by_params + pagination_params + order_by_params
+            cursor.execute(final_query, tuple(final_params))
             db_results_raw = cursor.fetchall()
     except Exception as e:
         logger.error(f"DB error for search '{search_term}': {e}", exc_info=True)
-        # Check for the specific error to give a more helpful message
-        if 'relation "restaurants" does not exist' in str(e):
-             logger.critical("CRITICAL: The 'restaurants' table was not found. This is an environment issue. Ensure the preview database schema is initialized.")
-             return jsonify({"error": "Database configuration error: Table not found."}), 500
         return jsonify({"error": "Database query failed"}), 500
 
     if not db_results_raw:
         return jsonify([])
 
-    # 6. Group results by restaurant and inspection (Unchanged from your version)
+    # 6. Group results by restaurant and inspection (Unchanged)
     restaurant_dict = {}
     for row in db_results_raw:
         camis = row['camis']
@@ -196,16 +183,21 @@ def search():
             if violation not in restaurant_dict[camis]['inspections'][inspection_date_str]['violations']:
                 restaurant_dict[camis]['inspections'][inspection_date_str]['violations'].append(violation)
     
-    formatted_results = [dict(data, inspections=list(data['inspections'].values())) for data in restaurant_dict.values()]
-    
+    # Sort inspections within each restaurant by date, most recent first.
+    final_results = []
+    for camis, data in restaurant_dict.items():
+        inspections = sorted(list(data['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
+        data['inspections'] = inspections
+        final_results.append(data)
+
     # 7. Cache the final result
     if redis_conn:
         try:
-            redis_conn.setex(cache_key, 3600, json.dumps(formatted_results, default=str))
+            redis_conn.setex(cache_key, 3600, json.dumps(final_results, default=str))
         except Exception as e:
             logger.error(f"Redis SETEX error: {e}")
             
-    return jsonify(formatted_results)
+    return jsonify(final_results)
 
 
 # --- Other Endpoints (Unchanged) ---
