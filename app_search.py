@@ -1,4 +1,4 @@
-# app_search.py - v8 - Corrected SQL Syntax
+# app_search.py - v9 - Corrected Final ORDER BY Syntax
 
 # Standard library imports
 import os
@@ -78,7 +78,7 @@ def search():
         return jsonify([])
 
     # 3. Build Cache Key
-    cache_key = f"search_v10_final:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
+    cache_key = f"search_v11_final:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -122,24 +122,25 @@ def search():
         order_by_params.extend([normalized_search, f"{normalized_search}%", normalized_search])
 
     pagination_params = [per_page, (page - 1) * per_page]
+    
+    # This logic creates the final ORDER BY clause with the correct table alias 'pc'.
+    final_order_by_clause = order_by_clause.replace('dba_normalized_search', 'pc.dba_normalized_search')
+    final_order_by_clause = final_order_by_clause.replace('dba ASC', 'pc.dba ASC')
+    final_order_by_clause = final_order_by_clause.replace('dba DESC', 'pc.dba DESC')
 
-    # This CTE-based query is cleaner and less prone to syntax errors.
     final_query = f"""
         WITH latest_restaurants AS (
-            -- Step 1: Find the most recent inspection for each restaurant.
             SELECT DISTINCT ON (camis) *
             FROM restaurants
             ORDER BY camis, inspection_date DESC
         ),
         paginated_camis AS (
-            -- Step 2: Filter, sort, and paginate the unique restaurants.
             SELECT camis, dba, dba_normalized_search
             FROM latest_restaurants
             WHERE {where_clause}
             {order_by_clause}
             LIMIT %s OFFSET %s
         )
-        -- Step 3: Join the final list of restaurant IDs back to the main tables to fetch all details.
         SELECT
             r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
             r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
@@ -147,16 +148,12 @@ def search():
         FROM paginated_camis pc
         JOIN restaurants r ON pc.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        -- Step 4: Final ordering must match the pagination order to ensure consistency.
-        -- This re-uses the same ordering logic, but on the final joined data.
-        {order_by_clause.replace('dba', 'pc.dba').replace('dba_normalized_search', 'pc.dba_normalized_search')}, r.inspection_date DESC;
+        {final_order_by_clause}, r.inspection_date DESC;
     """
     
     # 5. Execute Query and Process Results
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            # Assemble the final parameters list in the correct order.
-            # It includes params for WHERE, ORDER BY (in CTE), pagination, and the final ORDER BY.
             final_params = params + order_by_params + pagination_params + order_by_params
             cursor.execute(final_query, tuple(final_params))
             db_results_raw = cursor.fetchall()
@@ -183,7 +180,6 @@ def search():
             if violation not in restaurant_dict[camis]['inspections'][inspection_date_str]['violations']:
                 restaurant_dict[camis]['inspections'][inspection_date_str]['violations'].append(violation)
     
-    # Sort inspections within each restaurant by date, most recent first.
     final_results = []
     for camis, data in restaurant_dict.items():
         inspections = sorted(list(data['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
@@ -201,7 +197,6 @@ def search():
 
 
 # --- Other Endpoints (Unchanged) ---
-
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
     return jsonify([])
