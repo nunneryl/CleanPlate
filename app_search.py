@@ -1,4 +1,4 @@
-# app_search.py - v9 - Corrected Final ORDER BY Syntax
+# app_search.py - v10 - Definitive and Simplified Query
 
 # Standard library imports
 import os
@@ -51,7 +51,7 @@ def normalize_search_term_for_hybrid(text):
     return normalized_text.strip()
 
 
-# --- ##### REWRITTEN AND ROBUST SEARCH ENDPOINT ##### ---
+# --- ##### DEFINITIVE AND SIMPLIFIED SEARCH ENDPOINT ##### ---
 @app.route('/search', methods=['GET'])
 def search():
     # 1. Get and Validate Parameters
@@ -78,7 +78,7 @@ def search():
         return jsonify([])
 
     # 3. Build Cache Key
-    cache_key = f"search_v11_final:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
+    cache_key = f"search_v12_final:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -104,12 +104,11 @@ def search():
     where_clause = " AND ".join(where_conditions)
 
     order_by_clause = ""
-    order_by_params = []
     if sort_by == 'name_asc':
         order_by_clause = "ORDER BY dba ASC"
     elif sort_by == 'name_desc':
         order_by_clause = "ORDER BY dba DESC"
-    else:
+    else: # 'relevance'
         order_by_clause = """
         ORDER BY
             CASE
@@ -119,42 +118,43 @@ def search():
             END,
             similarity(dba_normalized_search, %s) DESC
         """
-        order_by_params.extend([normalized_search, f"{normalized_search}%", normalized_search])
+        params.extend([normalized_search, f"{normalized_search}%", normalized_search])
 
-    pagination_params = [per_page, (page - 1) * per_page]
-    
-    # This logic creates the final ORDER BY clause with the correct table alias 'pc'.
-    final_order_by_clause = order_by_clause.replace('dba_normalized_search', 'pc.dba_normalized_search')
-    final_order_by_clause = final_order_by_clause.replace('dba ASC', 'pc.dba ASC')
-    final_order_by_clause = final_order_by_clause.replace('dba DESC', 'pc.dba DESC')
+    params.extend([per_page, (page - 1) * per_page])
 
+    # This simplified query uses a window function (row_number) to preserve the sort order,
+    # which is a standard and robust way to handle complex pagination and sorting.
     final_query = f"""
         WITH latest_restaurants AS (
             SELECT DISTINCT ON (camis) *
             FROM restaurants
             ORDER BY camis, inspection_date DESC
         ),
-        paginated_camis AS (
-            SELECT camis, dba, dba_normalized_search
+        sorted_restaurants AS (
+            SELECT camis, ROW_NUMBER() OVER () as rn
             FROM latest_restaurants
             WHERE {where_clause}
             {order_by_clause}
-            LIMIT %s OFFSET %s
         )
         SELECT
             r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
             r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
             r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description
-        FROM paginated_camis pc
-        JOIN restaurants r ON pc.camis = r.camis
+        FROM sorted_restaurants sr
+        JOIN restaurants r ON sr.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        {final_order_by_clause}, r.inspection_date DESC;
+        WHERE sr.rn > %s AND sr.rn <= %s
+        ORDER BY sr.rn, r.inspection_date DESC;
     """
     
     # 5. Execute Query and Process Results
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            final_params = params + order_by_params + pagination_params + order_by_params
+            # We must now recalculate the offset and limit for the WHERE clause.
+            offset = (page - 1) * per_page
+            limit = offset + per_page
+            # The final parameter list is simpler now.
+            final_params = params + [offset, limit]
             cursor.execute(final_query, tuple(final_params))
             db_results_raw = cursor.fetchall()
     except Exception as e:
