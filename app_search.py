@@ -1,4 +1,4 @@
-# app_search.py - Definitive Final Version
+# app_search.py - Final Working Version
 
 # Standard library imports
 import os
@@ -21,7 +21,6 @@ try:
     from update_database import run_database_update
     update_logic_imported = True
 except ImportError:
-    # Dummy classes for local execution without full environment
     class DatabaseConnection:
         def __enter__(self): return None
         def __exit__(self, t, v, tb): pass
@@ -51,7 +50,7 @@ def normalize_search_term_for_hybrid(text):
     return normalized_text.strip()
 
 
-# --- ##### DEFINITIVE AND SIMPLIFIED SEARCH ENDPOINT ##### ---
+# --- ##### FINAL WORKING SEARCH ENDPOINT ##### ---
 @app.route('/search', methods=['GET'])
 def search():
     # 1. Get and Validate Parameters
@@ -78,7 +77,7 @@ def search():
         return jsonify([])
 
     # 3. Build Cache Key
-    cache_key = f"search_final_v15:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
+    cache_key = f"search_final_v16:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -91,64 +90,68 @@ def search():
     # 4. Dynamically Build SQL Query and Parameters
     params = []
     
-    where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
+    where_conditions = ["(lr.dba_normalized_search ILIKE %s OR similarity(lr.dba_normalized_search, %s) > 0.4)"]
     params.extend([f"%{normalized_search}%", normalized_search])
 
     if grade_filter:
-        where_conditions.append("grade = %s")
+        where_conditions.append("lr.grade = %s")
         params.append(grade_filter)
 
     if boro_filter:
-        where_conditions.append("boro = %s")
+        where_conditions.append("lr.boro = %s")
         params.append(boro_filter)
 
     where_clause = " AND ".join(where_conditions)
 
     order_by_clause = ""
     if sort_by == 'name_asc':
-        order_by_clause = "ORDER BY dba ASC"
+        order_by_clause = "ORDER BY lr.dba ASC"
     elif sort_by == 'name_desc':
-        order_by_clause = "ORDER BY dba DESC"
+        order_by_clause = "ORDER BY lr.dba DESC"
     else: # 'relevance'
         order_by_clause = """
         ORDER BY
             CASE
-                WHEN dba_normalized_search = %s THEN 0
-                WHEN dba_normalized_search LIKE %s THEN 1
+                WHEN lr.dba_normalized_search = %s THEN 0
+                WHEN lr.dba_normalized_search LIKE %s THEN 1
                 ELSE 2
             END,
-            similarity(dba_normalized_search, %s) DESC
+            similarity(lr.dba_normalized_search, %s) DESC
         """
-        params.extend([normalized_search, f"{normalized_search}%", normalized_search])
+        params.extend([normalized_search, f"%{normalized_search}%", normalized_search])
 
-    # THIS IS THE FIX: Perform the calculation in Python, not in the SQL string.
     offset = (page - 1) * per_page
-    limit = page * per_page
-    params.extend([offset, limit])
+    params.extend([per_page, offset])
 
-    # THIS IS THE FIX: The pagination WHERE clause is now simpler and correct.
+    # This query is simpler and uses a standard LIMIT/OFFSET for pagination.
     final_query = f"""
         WITH latest_restaurants AS (
             SELECT DISTINCT ON (camis) *
             FROM restaurants
             ORDER BY camis, inspection_date DESC
         ),
-        sorted_restaurants AS (
-            SELECT camis, ROW_NUMBER() OVER ({order_by_clause}) as rn
-            FROM latest_restaurants
+        paginated_camis AS (
+            SELECT camis
+            FROM latest_restaurants lr
             WHERE {where_clause}
+            {order_by_clause}
+            LIMIT %s OFFSET %s
         )
         SELECT
             r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
             r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
             r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description
-        FROM sorted_restaurants sr
-        JOIN restaurants r ON sr.camis = r.camis
+        FROM paginated_camis pc
+        JOIN latest_restaurants lr ON pc.camis = lr.camis -- Join back to get sorted columns
+        JOIN restaurants r ON pc.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        WHERE sr.rn > %s AND sr.rn <= %s
-        ORDER BY sr.rn, r.inspection_date DESC;
+        {order_by_clause}, r.inspection_date DESC;
     """
     
+    # The final ORDER BY needs its parameters repeated.
+    if sort_by == 'relevance':
+        params.extend([normalized_search, f"%{normalized_search}%", normalized_search])
+
     # 5. Execute Query and Process Results
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
@@ -161,17 +164,27 @@ def search():
     if not db_results_raw:
         return jsonify([])
 
-    # 6. Group results by restaurant and inspection (Unchanged)
+    # 6. Group results by restaurant and inspection
     restaurant_dict = {}
     for row in db_results_raw:
         camis = row['camis']
-        if not camis: continue
         if camis not in restaurant_dict:
-            restaurant_dict[camis] = {k: v for k, v in row.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
+            restaurant_dict[camis] = {
+                k: v for k, v in row.items()
+                if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']
+            }
             restaurant_dict[camis]['inspections'] = {}
+        
         inspection_date_str = row['inspection_date'].isoformat()
         if inspection_date_str not in restaurant_dict[camis]['inspections']:
-            restaurant_dict[camis]['inspections'][inspection_date_str] = {'inspection_date': inspection_date_str, 'critical_flag': row['critical_flag'], 'grade': row['grade'], 'inspection_type': row['inspection_type'], 'violations': []}
+            restaurant_dict[camis]['inspections'][inspection_date_str] = {
+                'inspection_date': inspection_date_str,
+                'critical_flag': row['critical_flag'],
+                'grade': row['grade'],
+                'inspection_type': row['inspection_type'],
+                'violations': []
+            }
+        
         if row['violation_code']:
             violation = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
             if violation not in restaurant_dict[camis]['inspections'][inspection_date_str]['violations']:
@@ -197,22 +210,6 @@ def search():
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
     return jsonify([])
-
-# --- ##### NEW DIAGNOSTIC ENDPOINT ##### ---
-@app.route('/test_db', methods=['GET'])
-def test_db():
-    logger.info("--- Executing /test_db endpoint ---")
-    try:
-        with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            # Execute the simplest possible query to see if ANY data is visible
-            cursor.execute("SELECT camis, dba, grade FROM restaurants LIMIT 5;")
-            results = [dict(row) for row in cursor.fetchall()]
-            logger.info(f"--- /test_db query found {len(results)} results ---")
-            return jsonify(results)
-    except Exception as e:
-        logger.error(f"Error in /test_db: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-# --- ##### END NEW DIAGNOSTIC ENDPOINT ##### ---
 
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
