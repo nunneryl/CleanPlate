@@ -1,4 +1,4 @@
-# app_search.py - v11 - Definitive Parameter Matching Fix
+# app_search.py - Definitive Final Version
 
 # Standard library imports
 import os
@@ -78,7 +78,7 @@ def search():
         return jsonify([])
 
     # 3. Build Cache Key
-    cache_key = f"search_v13_final:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
+    cache_key = f"search_final_v14:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -90,18 +90,18 @@ def search():
 
     # 4. Dynamically Build SQL Query and Parameters
     # This list will hold all parameters in the exact order they appear in the query.
-    final_params = []
+    params = []
     
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
-    final_params.extend([f"%{normalized_search}%", normalized_search])
+    params.extend([f"%{normalized_search}%", normalized_search])
 
     if grade_filter:
         where_conditions.append("grade = %s")
-        final_params.append(grade_filter)
+        params.append(grade_filter)
 
     if boro_filter:
         where_conditions.append("boro = %s")
-        final_params.append(boro_filter)
+        params.append(boro_filter)
 
     where_clause = " AND ".join(where_conditions)
 
@@ -120,12 +120,13 @@ def search():
             END,
             similarity(dba_normalized_search, %s) DESC
         """
-        final_params.extend([normalized_search, f"{normalized_search}%", normalized_search])
+        params.extend([normalized_search, f"{normalized_search}%", normalized_search])
 
     # Add pagination parameters
     offset = (page - 1) * per_page
-    final_params.extend([offset, per_page])
+    params.extend([offset, per_page])
 
+    # The SQL query remains the same, but the parameter assembly logic is now corrected.
     final_query = f"""
         WITH latest_restaurants AS (
             SELECT DISTINCT ON (camis) *
@@ -144,16 +145,17 @@ def search():
         FROM sorted_restaurants sr
         JOIN restaurants r ON sr.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        WHERE sr.rn > %s AND sr.rn <= %s + %s
+        WHERE sr.rn > %s AND sr.rn <= (%s + %s)
         ORDER BY sr.rn, r.inspection_date DESC;
     """
-    # Add the final pagination parameters again for the outer WHERE clause
-    final_params.extend([offset, offset, per_page])
+    
+    # We add the offset parameter one last time for the final WHERE clause.
+    params.append(offset)
     
     # 5. Execute Query and Process Results
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute(final_query, tuple(final_params))
+            cursor.execute(final_query, tuple(params))
             db_results_raw = cursor.fetchall()
     except Exception as e:
         logger.error(f"DB error for search '{search_term}': {e}", exc_info=True)
