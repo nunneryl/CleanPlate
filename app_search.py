@@ -1,4 +1,4 @@
-# app_search.py - v10 - Definitive and Simplified Query
+# app_search.py - v11 - Definitive Parameter Matching Fix
 
 # Standard library imports
 import os
@@ -78,7 +78,7 @@ def search():
         return jsonify([])
 
     # 3. Build Cache Key
-    cache_key = f"search_v12_final:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
+    cache_key = f"search_v13_final:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -89,17 +89,19 @@ def search():
             logger.error(f"Redis GET error: {e}")
 
     # 4. Dynamically Build SQL Query and Parameters
-    params = []
+    # This list will hold all parameters in the exact order they appear in the query.
+    final_params = []
+    
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
-    params.extend([f"%{normalized_search}%", normalized_search])
+    final_params.extend([f"%{normalized_search}%", normalized_search])
 
     if grade_filter:
         where_conditions.append("grade = %s")
-        params.append(grade_filter)
+        final_params.append(grade_filter)
 
     if boro_filter:
         where_conditions.append("boro = %s")
-        params.append(boro_filter)
+        final_params.append(boro_filter)
 
     where_clause = " AND ".join(where_conditions)
 
@@ -118,12 +120,12 @@ def search():
             END,
             similarity(dba_normalized_search, %s) DESC
         """
-        params.extend([normalized_search, f"{normalized_search}%", normalized_search])
+        final_params.extend([normalized_search, f"{normalized_search}%", normalized_search])
 
-    params.extend([per_page, (page - 1) * per_page])
+    # Add pagination parameters
+    offset = (page - 1) * per_page
+    final_params.extend([offset, per_page])
 
-    # This simplified query uses a window function (row_number) to preserve the sort order,
-    # which is a standard and robust way to handle complex pagination and sorting.
     final_query = f"""
         WITH latest_restaurants AS (
             SELECT DISTINCT ON (camis) *
@@ -131,10 +133,9 @@ def search():
             ORDER BY camis, inspection_date DESC
         ),
         sorted_restaurants AS (
-            SELECT camis, ROW_NUMBER() OVER () as rn
+            SELECT camis, ROW_NUMBER() OVER ({order_by_clause}) as rn
             FROM latest_restaurants
             WHERE {where_clause}
-            {order_by_clause}
         )
         SELECT
             r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
@@ -143,18 +144,15 @@ def search():
         FROM sorted_restaurants sr
         JOIN restaurants r ON sr.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        WHERE sr.rn > %s AND sr.rn <= %s
+        WHERE sr.rn > %s AND sr.rn <= %s + %s
         ORDER BY sr.rn, r.inspection_date DESC;
     """
+    # Add the final pagination parameters again for the outer WHERE clause
+    final_params.extend([offset, offset, per_page])
     
     # 5. Execute Query and Process Results
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            # We must now recalculate the offset and limit for the WHERE clause.
-            offset = (page - 1) * per_page
-            limit = offset + per_page
-            # The final parameter list is simpler now.
-            final_params = params + [offset, limit]
             cursor.execute(final_query, tuple(final_params))
             db_results_raw = cursor.fetchall()
     except Exception as e:
