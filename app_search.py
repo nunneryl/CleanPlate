@@ -1,4 +1,4 @@
-# app_search.py - Final Working Version
+# app_search.py - The Final Working Version
 
 # Standard library imports
 import os
@@ -77,7 +77,7 @@ def search():
         return jsonify([])
 
     # 3. Build Cache Key
-    cache_key = f"search_final_v16:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
+    cache_key = f"search_final_v17:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -90,40 +90,40 @@ def search():
     # 4. Dynamically Build SQL Query and Parameters
     params = []
     
-    where_conditions = ["(lr.dba_normalized_search ILIKE %s OR similarity(lr.dba_normalized_search, %s) > 0.4)"]
+    where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
     params.extend([f"%{normalized_search}%", normalized_search])
 
     if grade_filter:
-        where_conditions.append("lr.grade = %s")
+        where_conditions.append("grade = %s")
         params.append(grade_filter)
 
     if boro_filter:
-        where_conditions.append("lr.boro = %s")
+        where_conditions.append("boro = %s")
         params.append(boro_filter)
 
     where_clause = " AND ".join(where_conditions)
 
     order_by_clause = ""
     if sort_by == 'name_asc':
-        order_by_clause = "ORDER BY lr.dba ASC"
+        order_by_clause = "ORDER BY dba ASC"
     elif sort_by == 'name_desc':
-        order_by_clause = "ORDER BY lr.dba DESC"
+        order_by_clause = "ORDER BY dba DESC"
     else: # 'relevance'
         order_by_clause = """
         ORDER BY
             CASE
-                WHEN lr.dba_normalized_search = %s THEN 0
-                WHEN lr.dba_normalized_search LIKE %s THEN 1
+                WHEN dba_normalized_search = %s THEN 0
+                WHEN dba_normalized_search LIKE %s THEN 1
                 ELSE 2
             END,
-            similarity(lr.dba_normalized_search, %s) DESC
+            similarity(dba_normalized_search, %s) DESC
         """
         params.extend([normalized_search, f"%{normalized_search}%", normalized_search])
 
     offset = (page - 1) * per_page
     params.extend([per_page, offset])
 
-    # This query is simpler and uses a standard LIMIT/OFFSET for pagination.
+    # This is the final, simplified, and correct query.
     final_query = f"""
         WITH latest_restaurants AS (
             SELECT DISTINCT ON (camis) *
@@ -131,8 +131,8 @@ def search():
             ORDER BY camis, inspection_date DESC
         ),
         paginated_camis AS (
-            SELECT camis
-            FROM latest_restaurants lr
+            SELECT camis, ROW_NUMBER() OVER() as rn
+            FROM latest_restaurants
             WHERE {where_clause}
             {order_by_clause}
             LIMIT %s OFFSET %s
@@ -142,16 +142,11 @@ def search():
             r.latitude, r.longitude, r.inspection_date, r.critical_flag, r.grade,
             r.inspection_type, v.violation_code, v.violation_description, r.cuisine_description
         FROM paginated_camis pc
-        JOIN latest_restaurants lr ON pc.camis = lr.camis -- Join back to get sorted columns
         JOIN restaurants r ON pc.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        {order_by_clause}, r.inspection_date DESC;
+        ORDER BY pc.rn, r.inspection_date DESC;
     """
     
-    # The final ORDER BY needs its parameters repeated.
-    if sort_by == 'relevance':
-        params.extend([normalized_search, f"%{normalized_search}%", normalized_search])
-
     # 5. Execute Query and Process Results
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
@@ -162,6 +157,7 @@ def search():
         return jsonify({"error": "Database query failed"}), 500
 
     if not db_results_raw:
+        logger.warning(f"Query for '{search_term}' executed successfully but returned no results.")
         return jsonify([])
 
     # 6. Group results by restaurant and inspection
