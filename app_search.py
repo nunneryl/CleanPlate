@@ -78,7 +78,7 @@ def search():
         return jsonify([])
 
     # 3. Build Cache Key
-    cache_key = f"search_final_v14:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
+    cache_key = f"search_final_v15:{normalized_search}:g{grade_filter}:b{boro_filter}:s{sort_by}:p{page}:pp{per_page}"
     redis_conn = get_redis_client()
     if redis_conn:
         try:
@@ -89,7 +89,6 @@ def search():
             logger.error(f"Redis GET error: {e}")
 
     # 4. Dynamically Build SQL Query and Parameters
-    # This list will hold all parameters in the exact order they appear in the query.
     params = []
     
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
@@ -122,11 +121,12 @@ def search():
         """
         params.extend([normalized_search, f"{normalized_search}%", normalized_search])
 
-    # Add pagination parameters
+    # THIS IS THE FIX: Perform the calculation in Python, not in the SQL string.
     offset = (page - 1) * per_page
-    params.extend([offset, per_page])
+    limit = page * per_page
+    params.extend([offset, limit])
 
-    # The SQL query remains the same, but the parameter assembly logic is now corrected.
+    # THIS IS THE FIX: The pagination WHERE clause is now simpler and correct.
     final_query = f"""
         WITH latest_restaurants AS (
             SELECT DISTINCT ON (camis) *
@@ -145,12 +145,9 @@ def search():
         FROM sorted_restaurants sr
         JOIN restaurants r ON sr.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        WHERE sr.rn > %s AND sr.rn <= (%s + %s)
+        WHERE sr.rn > %s AND sr.rn <= %s
         ORDER BY sr.rn, r.inspection_date DESC;
     """
-    
-    # We add the offset parameter one last time for the final WHERE clause.
-    params.append(offset)
     
     # 5. Execute Query and Process Results
     try:
