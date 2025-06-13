@@ -198,6 +198,22 @@ def search():
 def recent_restaurants():
     return jsonify([])
 
+# --- ##### NEW DIAGNOSTIC ENDPOINT ##### ---
+@app.route('/test_db', methods=['GET'])
+def test_db():
+    logger.info("--- Executing /test_db endpoint ---")
+    try:
+        with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            # Execute the simplest possible query to see if ANY data is visible
+            cursor.execute("SELECT camis, dba, grade FROM restaurants LIMIT 5;")
+            results = [dict(row) for row in cursor.fetchall()]
+            logger.info(f"--- /test_db query found {len(results)} results ---")
+            return jsonify(results)
+    except Exception as e:
+        logger.error(f"Error in /test_db: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+# --- ##### END NEW DIAGNOSTIC ENDPOINT ##### ---
+
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
     if not update_logic_imported:
