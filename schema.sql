@@ -1,13 +1,14 @@
--- schema.sql (Simplified)
+-- schema.sql (Final Version)
+-- This version adds the dba_normalized_search column to the restaurants table.
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS unaccent;
 
--- Create the 'restaurants' table if it doesn't already exist.
 CREATE TABLE IF NOT EXISTS restaurants (
     camis INT NOT NULL,
     inspection_date DATE NOT NULL,
     dba TEXT,
+    -- This column will store the cleaned, searchable version of the restaurant name.
     dba_normalized_search TEXT,
     boro TEXT,
     building TEXT,
@@ -24,8 +25,6 @@ CREATE TABLE IF NOT EXISTS restaurants (
     PRIMARY KEY (camis, inspection_date)
 );
 
--- Create the 'violations' table if it doesn't already exist.
--- The complex foreign key has been removed to prevent insertion issues.
 CREATE TABLE IF NOT EXISTS violations (
     id SERIAL PRIMARY KEY,
     camis INT NOT NULL,
@@ -34,7 +33,7 @@ CREATE TABLE IF NOT EXISTS violations (
     violation_description TEXT
 );
 
--- Create indexes to speed up common queries.
+-- Indexes to speed up queries.
 CREATE INDEX IF NOT EXISTS idx_restaurants_dba_normalized_search ON restaurants USING gin (dba_normalized_search gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_restaurants_grade ON restaurants (grade);
 CREATE INDEX IF NOT EXISTS idx_restaurants_boro ON restaurants (boro);
