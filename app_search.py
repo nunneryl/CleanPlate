@@ -1,4 +1,4 @@
-# app_search.py - Definitive Version with Debug Logging
+# app_search.py - Definitive Final Version
 
 import os
 import re
@@ -80,39 +80,38 @@ SEARCH_TERM_SYNONYMS = {
     'sbarro': 'sbarro', 'halalguys': 'the halal guys', 'shakeshack': 'shake shack', 'wholefoods': 'whole foods market', 'traderjoes': 'trader joes'
 }
 
-# --- WORKING NORMALIZATION FUNCTION ---
+# --- FINAL NORMALIZATION FUNCTION ---
 def normalize_search_term_for_hybrid(text):
     if not isinstance(text, str): return ''
     normalized_text = text.lower().replace('&', ' and ')
     accent_map = { 'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o', 'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ç': 'c', 'ñ': 'n' }
     for accented, unaccented in accent_map.items():
         normalized_text = normalized_text.replace(accented, unaccented)
-    normalized_text = re.sub(r"[']", "", normalized_text)
-    normalized_text = re.sub(r"[./-]", " ", normalized_text)
+    
+    # THE FIX: Remove apostrophes and periods completely, don't replace with a space.
+    # This makes "P.J." and "PJ" identical from the start.
+    normalized_text = re.sub(r"['.]", "", normalized_text)
+    
+    # Now handle other characters
+    normalized_text = re.sub(r"[-/]", " ", normalized_text)
     normalized_text = re.sub(r"[^a-z0-9\s]", "", normalized_text)
     normalized_text = re.sub(r"\s+", " ", normalized_text)
     return normalized_text.strip()
 
-# --- WORKING SEARCH ENDPOINT with DEBUG LOGGING ---
+# --- SEARCH ENDPOINT ---
 @app.route('/search', methods=['GET'])
 def search():
     search_term = request.args.get('name', '').strip()
-    # --- DEBUG ---
-    print(f"--- NEW SEARCH REQUEST ---", flush=True)
-    print(f"[DEBUG] Received search term: '{search_term}'", flush=True)
-    
     page = int(request.args.get('page', 1))
     per_page = int(request.args.get('per_page', 25))
 
     if not search_term: return jsonify([])
 
     normalized_search = normalize_search_term_for_hybrid(search_term)
-    print(f"[DEBUG] Normalized term: '{normalized_search}'", flush=True)
-
+    
     term_for_synonym_check = re.sub(r"\s+", "", normalized_search)
     if term_for_synonym_check in SEARCH_TERM_SYNONYMS:
         normalized_search = SEARCH_TERM_SYNONYMS[term_for_synonym_check]
-        print(f"[DEBUG] Synonym found. Final search term: '{normalized_search}'", flush=True)
     
     if not normalized_search: return jsonify([])
 
@@ -150,22 +149,17 @@ def search():
     starts_with_pattern = f"{normalized_search}%"
     offset = (page - 1) * per_page
     params = (contains_pattern, normalized_search, normalized_search, starts_with_pattern, normalized_search, per_page, offset, normalized_search, starts_with_pattern, normalized_search)
-    print(f"[DEBUG] Executing query with params: {params}", flush=True)
 
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute(query, params)
             results = cursor.fetchall()
-            print(f"[DEBUG] Query returned {len(results)} rows.", flush=True)
     except Exception as e:
         logger.error(f"DB search failed for '{search_term}': {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
-    if not results:
-        print(f"--- SEARCH ENDED: No results found in DB. ---", flush=True)
-        return jsonify([])
+    if not results: return jsonify([])
 
-    # ... (rest of the formatting logic) ...
     restaurant_dict = {}
     for row in results:
         camis = str(row['camis'])
@@ -181,12 +175,12 @@ def search():
                 restaurant_dict[camis]['inspections'][insp_date_str]['violations'].append(v_data)
 
     final_results = [{**data, 'inspections': sorted(list(data['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)} for data in restaurant_dict.values()]
-    print(f"--- SEARCH ENDED: Returning {len(final_results)} formatted restaurant objects. ---", flush=True)
     return jsonify(final_results)
 
 # Other endpoints...
 @app.route('/recent', methods=['GET'])
 def recent_restaurants(): return jsonify([])
+
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
     if not update_logic_imported: return jsonify({"status": "error", "message": "Update logic unavailable."}), 500
@@ -196,8 +190,10 @@ def trigger_update():
         return jsonify({"status": "error", "message": "Unauthorized."}), 403
     threading.Thread(target=run_database_update, args=(15,), daemon=True).start()
     return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
+
 @app.errorhandler(404)
 def not_found_error_handler(error): return jsonify({"error": "Endpoint not found"}), 404
+
 @app.errorhandler(500)
 def internal_server_error_handler(error):
     logger.error(f"Internal Server Error (500): {error}", exc_info=True)
