@@ -1,16 +1,25 @@
-# clear_cache.py
-# A simple utility to clear the Redis cache for the application.
+# clear_cache.py - v2 with Automated Path Fix
 
 import logging
+import sys
+import os
+
+# --- FIX for Python Import Path ---
+# This block ensures that Python looks for modules in the same directory
+# as this script. This resolves the "Could not import" error when running
+# the script directly inside the Railway container.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(SCRIPT_DIR)
+# --- End of Fix ---
+
 
 # Local application imports
-# This uses your app's existing functions to connect to Redis.
+# This import will now succeed because we've told Python where to look.
 try:
     from db_manager import get_redis_client
     logging.info("Successfully imported Redis client from db_manager.")
 except ImportError:
     logging.critical("FATAL: Could not import get_redis_client from db_manager.py.")
-    logging.critical("Please ensure this script is in the same directory as your other backend files.")
     exit(1)
 
 # --- Logging Setup ---
@@ -23,15 +32,13 @@ logger = logging.getLogger(__name__)
 
 def clear_redis_cache():
     """
-    Connects to Redis and flushes the entire database (db 0),
-    clearing all cached search results.
+    Connects to Redis and flushes the entire database, clearing all cached results.
     """
     logger.info("Attempting to connect to Redis to clear the cache...")
     redis_conn = get_redis_client()
     
     if redis_conn:
         try:
-            # The flushdb() command deletes all keys in the current database.
             redis_conn.flushdb()
             logger.info("SUCCESS: Redis cache has been cleared.")
             logger.info("Your app will now fetch fresh results from the database on the next search.")
