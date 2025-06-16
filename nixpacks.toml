@@ -1,5 +1,6 @@
-# nixpacks.toml (Corrected Version)
+# nixpacks.toml
 
 [phases.setup]
-# This correctly tells the build system to install the PostgreSQL client tools, including psql.
-pkgs = ["postgresql"]
+# This line tells the build environment's package manager (apt) to install 
+# the PostgreSQL client, which includes the 'psql' command-line tool.
+aptPkgs = ["postgresql-client"]

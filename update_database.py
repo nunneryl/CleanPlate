@@ -1,7 +1,7 @@
-# update_database.py (Final Version)
-# This version calculates and saves the normalized search name.
+# update_database.py (Definitive Version)
 
 import os
+import re
 import requests
 import logging
 import argparse
@@ -11,7 +11,8 @@ import psycopg2
 import psycopg2.extras
 
 # Import the normalization function from app_search
-from app_search import normalize_search_term_for_hybrid as normalize_search_term
+# Note: This creates a dependency, ensure app_search.py is accessible
+from app_search import normalize_search_term_for_hybrid
 
 from db_manager import DatabaseConnection
 from config import APIConfig
@@ -50,13 +51,12 @@ def update_database_batch(data):
         camis = item.get("camis")
         inspection_date = convert_date(item.get("inspection_date"))
         if not (camis and inspection_date): continue
-
+        
         dba = item.get("dba")
-        # Calculate the normalized name before insertion
-        normalized_dba = normalize_search_term(dba) if dba else None
+        normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
 
         restaurants_to_insert.append((
-            camis, dba, normalized_dba, # Add the normalized name
+            camis, dba, normalized_dba,
             item.get("boro"), item.get("building"), item.get("street"),
             item.get("zipcode"), item.get("phone"),
             float(item.get("latitude")) if item.get("latitude") and item.get("latitude") not in ['N/A', ''] else None,
@@ -72,7 +72,7 @@ def update_database_batch(data):
     r_count, v_count = 0, 0
     with DatabaseConnection() as conn, conn.cursor() as cursor:
         if restaurants_to_insert:
-            unique_restaurants = list({r[0:2]: r for r in restaurants_to_insert}.values())
+            unique_restaurants = list({(r[0], r[11]): r for r in restaurants_to_insert}.values())
             logger.info(f"Executing batch insert for {len(unique_restaurants)} unique restaurant inspections...")
             upsert_sql = """
                 INSERT INTO restaurants (
@@ -88,39 +88,33 @@ def update_database_batch(data):
             psycopg2.extras.execute_values(cursor, upsert_sql, unique_restaurants, page_size=200)
             r_count = cursor.rowcount
             logger.info(f"Restaurant insert executed. Affected rows: {r_count}")
-            
-            if violations_to_insert:
-                unique_violations = list(set(violations_to_insert))
-                logger.info(f"Executing batch insert for {len(unique_violations)} unique violations...")
-                insert_sql = "INSERT INTO violations (camis, inspection_date, violation_code, violation_description) VALUES %s ON CONFLICT DO NOTHING;"
-                psycopg2.extras.execute_values(cursor, insert_sql, unique_violations, page_size=1000)
-                v_count = cursor.rowcount if cursor.rowcount != -1 else len(unique_violations)
-                logger.info(f"Violation insert executed. Affected rows (approx): {v_count}")
-            conn.commit()
-            success = True
-            logger.info("DB transaction committed.")
-    except Exception as e:
-        logger.error(f"Batch DB update error: {e}", exc_info=True)
-        if conn: conn.rollback()
-    return r_count if success else 0, v_count if success else 0
 
-def run_database_update(days_back=5): # Default for daily runs
+        if violations_to_insert:
+            unique_violations = list(set(violations_to_insert))
+            logger.info(f"Executing batch insert for {len(unique_violations)} unique violations...")
+            insert_sql = "INSERT INTO violations (camis, inspection_date, violation_code, violation_description) VALUES %s ON CONFLICT DO NOTHING;"
+            psycopg2.extras.execute_values(cursor, insert_sql, unique_violations, page_size=1000)
+            v_count = cursor.rowcount
+            logger.info(f"Violation insert executed. Affected rows: {v_count}")
+        
+        conn.commit()
+        logger.info("DB transaction committed.")
+
+    return r_count, v_count
+
+def run_database_update(days_back=15):
     logger.info(f"Starting DB update (days_back={days_back})")
-    try:
-        data = fetch_data(days_back=days_back)
-        if data:
-            r_upd, v_ins = update_database_batch(data)
-            logger.info(f"Update complete. Restaurants processed: {r_upd}, Violations: {v_ins}")
-        else: logger.warning("No data from API.")
-    except Exception as e:
-        logger.critical(f"Uncaught exception in run_database_update: {e}", exc_info=True)
-    finally: logger.info("DB update finished.")
+    data = fetch_data(days_back=days_back)
+    if data:
+        r_upd, v_ins = update_database_batch(data)
+        logger.info(f"Update complete. Restaurants processed: {r_upd}, Violations: {v_ins}")
+    else:
+        logger.warning("No data from API.")
+    logger.info("DB update finished.")
 
 if __name__ == '__main__':
-    if not logging.getLogger().handlers:
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', force=True)
     parser = argparse.ArgumentParser(description="Update restaurant inspection database.")
-    parser.add_argument("--days", type=int, default=5, help="Number of past days to fetch data for.")
-    args = parser.parse_args() # Removed --full-backfill as local script handles that now
+    parser.add_argument("--days", type=int, default=15, help="Number of past days to fetch data for.")
+    args = parser.parse_args()
     run_database_update(days_back=args.days)
     logger.info("Script execution finished.")
