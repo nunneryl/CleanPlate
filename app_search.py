@@ -1,4 +1,4 @@
-# app_search.py - LIVE Production Version with Final Normalization Fix
+# app_search.py - LIVE Production Version with Final Corrected Logic
 
 import os
 import re
@@ -13,7 +13,7 @@ import psycopg2.extras
 
 # Local application imports
 try:
-    from db_manager import DatabaseConnection, get_redis_client
+    from db_manager import DatabaseConnection
     from config import APIConfig
     from update_database import run_database_update
     update_logic_imported = True
@@ -26,34 +26,22 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# --- DEFINITIVE NORMALIZATION FUNCTION ---
+# --- NORMALIZATION FUNCTION (Restored to working v1.2 logic) ---
+# This version preserves spaces, which is necessary for the similarity() function.
 def normalize_search_term_for_hybrid(text):
-    """
-    Cleans a search term for robust matching.
-    - Lowercases text.
-    - Removes accents.
-    - Removes apostrophes.
-    - Replaces certain punctuation with spaces.
-    - **Removes all spaces** to make terms like "pjs" and "p j s" identical.
-    """
     if not isinstance(text, str): return ''
     normalized_text = text.lower().replace('&', ' and ')
-    
     accent_map = { 'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o', 'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ç': 'c', 'ñ': 'n' }
     for accented, unaccented in accent_map.items():
         normalized_text = normalized_text.replace(accented, unaccented)
-    
     normalized_text = re.sub(r"[']", "", normalized_text)
     normalized_text = re.sub(r"[./-]", " ", normalized_text)
     normalized_text = re.sub(r"[^a-z0-9\s]", "", normalized_text)
-    
-    # THE FIX: Remove all whitespace. "p j clarkes" and "pjs" both become "pjclarkes".
-    normalized_text = re.sub(r"\s+", "", normalized_text)
-    
+    normalized_text = re.sub(r"\s+", " ", normalized_text)
     return normalized_text.strip()
 
 
-# --- Live Search Endpoint ---
+# --- Live Search Endpoint with Corrected Query ---
 @app.route('/search', methods=['GET'])
 def search():
     search_term = request.args.get('name', '').strip()
@@ -63,20 +51,24 @@ def search():
     if not search_term:
         return jsonify([])
 
-    # The new normalization is applied here
     normalized_search = normalize_search_term_for_hybrid(search_term)
     
     if not normalized_search:
         return jsonify([])
 
-    # The query is now much simpler as it doesn't need complex relevance ranking
+    # THE CORRECTED QUERY: Restores the OR similarity(...) clause
     query = """
     WITH latest_restaurants AS (
         SELECT DISTINCT ON (camis) * FROM restaurants ORDER BY camis, inspection_date DESC
     ), paginated_camis AS (
         SELECT camis, dba, dba_normalized_search FROM latest_restaurants
-        WHERE dba_normalized_search LIKE %s
-        ORDER BY dba ASC
+        WHERE dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4
+        ORDER BY
+            CASE WHEN dba_normalized_search = %s THEN 0
+                 WHEN dba_normalized_search ILIKE %s THEN 1
+                 ELSE 2
+            END,
+            similarity(dba_normalized_search, %s) DESC, length(dba_normalized_search)
         LIMIT %s OFFSET %s
     )
     SELECT pc.camis, pc.dba, pc.dba_normalized_search, r.boro, r.building, r.street, r.zipcode, r.phone, r.latitude, r.longitude,
@@ -84,12 +76,22 @@ def search():
            v.violation_code, v.violation_description, r.cuisine_description
     FROM paginated_camis pc JOIN restaurants r ON pc.camis = r.camis
     LEFT JOIN violations v ON pc.camis = v.camis AND r.inspection_date = v.inspection_date
-    ORDER BY pc.dba ASC, r.inspection_date DESC;
+    ORDER BY
+        CASE WHEN pc.dba_normalized_search = %s THEN 0
+             WHEN pc.dba_normalized_search ILIKE %s THEN 1
+             ELSE 2
+        END,
+        similarity(pc.dba_normalized_search, %s) DESC,
+        length(pc.dba_normalized_search),
+        pc.dba ASC,
+        r.inspection_date DESC;
     """
     
     contains_pattern = f"%{normalized_search}%"
+    starts_with_pattern = f"{normalized_search}%"
     offset = (page - 1) * per_page
-    params = (contains_pattern, per_page, offset)
+    # The parameters now include the search term multiple times for the different parts of the query
+    params = (contains_pattern, normalized_search, normalized_search, starts_with_pattern, normalized_search, per_page, offset, normalized_search, starts_with_pattern, normalized_search)
 
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
