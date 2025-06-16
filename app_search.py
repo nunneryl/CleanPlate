@@ -117,6 +117,9 @@ SEARCH_TERM_SYNONYMS = {
     'baskinrobbins': 'baskin robbins', 'haagendazs': 'haagen dazs', 'benandjerrys': 'ben & jerrys',
     'auntieannes': 'auntie anne s', 'pretzeltime': 'pretzel time', 'nathansfamous': 'nathan s famous',
     'sbarro': 'sbarro', 'halalguys': 'the halal guys', 'shakeshack': 'shake shack', 'wholefoods': 'whole foods market', 'traderjoes': 'trader joes'
+    
+}
+    
 # --- Flask App Initialization ---
 app = Flask(__name__)
 CORS(app)
