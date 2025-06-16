@@ -92,14 +92,14 @@ def normalize_search_term_for_hybrid(text):
     normalized_text = re.sub(r"\s+", " ", normalized_text)
     return normalized_text.strip()
 
-# --- REFACTORED SEARCH ENDPOINT WITH FILTERS AND SORTING ---
+# --- CORRECTED SEARCH ENDPOINT WITH PROPER PARAMETER ORDERING ---
 @app.route('/search', methods=['GET'])
 def search():
     # 1. Get and validate parameters from the request
     search_term = request.args.get('name', '').strip()
     grade_filter = request.args.get('grade', type=str)
     boro_filter = request.args.get('boro', type=str)
-    sort_by = request.args.get('sort', 'relevance', type=str) # Default to 'relevance'
+    sort_by = request.args.get('sort', 'relevance', type=str)
     try:
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 25))
@@ -110,7 +110,7 @@ def search():
     if not search_term:
         return jsonify([])
 
-    # 2. Normalize search term and apply synonyms, just like the stable main branch
+    # 2. Normalize search term and apply synonyms
     normalized_search = normalize_search_term_for_hybrid(search_term)
     term_for_synonym_check = re.sub(r"\s+", "", normalized_search)
     if term_for_synonym_check in SEARCH_TERM_SYNONYMS:
@@ -119,27 +119,24 @@ def search():
     if not normalized_search:
         return jsonify([])
 
-    # 3. Dynamically build the query components and parameters list
-    query_params = []
+    # 3. Build query components and parameter lists in the correct order
     
-    # Build WHERE clause. This preserves the core similarity() logic.
+    # Parameters for the WHERE clause
+    where_params = [f"%{normalized_search}%", normalized_search]
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
-    query_params.extend([f"%{normalized_search}%", normalized_search])
-
     if grade_filter and grade_filter.upper() in ['A', 'B', 'C', 'P', 'Z', 'N']:
         where_conditions.append("grade = %s")
-        query_params.append(grade_filter.upper())
-
+        where_params.append(grade_filter.upper())
     if boro_filter:
         where_conditions.append("boro ILIKE %s")
-        query_params.append(boro_filter)
-
+        where_params.append(boro_filter)
     where_clause = " AND ".join(where_conditions)
 
-    # Build ORDER BY clauses. One for the inner query (CTE) to get the right page of restaurants,
-    # and one for the final query to sort all the returned inspection rows correctly.
+    # Parameters for the ORDER BY clauses
     cte_order_by_clause = ""
     final_order_by_clause = ""
+    cte_order_by_params = []
+    final_order_by_params = []
 
     if sort_by == 'name_asc':
         cte_order_by_clause = "ORDER BY dba ASC, dba_normalized_search"
@@ -147,10 +144,11 @@ def search():
     elif sort_by == 'name_desc':
         cte_order_by_clause = "ORDER BY dba DESC, dba_normalized_search"
         final_order_by_clause = "ORDER BY pc.dba DESC, pc.dba_normalized_search, r.inspection_date DESC"
-    else: # Default to 'relevance' sorting
+    else: # Default 'relevance'
         relevance_params = [normalized_search, f"{normalized_search}%", normalized_search]
+        cte_order_by_params = relevance_params
+        final_order_by_params = relevance_params
         
-        # This clause orders the restaurants within the CTE for correct pagination
         cte_order_by_clause = """
         ORDER BY
             CASE WHEN dba_normalized_search = %s THEN 0
@@ -161,10 +159,6 @@ def search():
             length(dba_normalized_search),
             dba ASC
         """
-        query_params.extend(relevance_params)
-        
-        # This clause orders the final, fanned-out result set, preserving the restaurant
-        # order and sorting their inspections by date.
         final_order_by_clause = """
         ORDER BY
             (CASE WHEN pc.dba_normalized_search = %s THEN 0
@@ -176,14 +170,14 @@ def search():
             pc.dba ASC,
             r.inspection_date DESC
         """
-        # We need to add the params again for this final clause
-        query_params.extend(relevance_params)
-        
-    # Add pagination parameters to the list
-    offset = (page - 1) * per_page
-    query_params.extend([per_page, offset])
 
-    # 4. Construct the final, complete query
+    # Parameters for pagination
+    offset = (page - 1) * per_page
+    pagination_params = [per_page, offset]
+    
+    # 4. Assemble the final query and the complete parameter list in the correct order
+    query_params = where_params + cte_order_by_params + pagination_params + final_order_by_params
+    
     query = f"""
         WITH latest_restaurants AS (
             SELECT DISTINCT ON (camis) * FROM restaurants ORDER BY camis, inspection_date DESC
@@ -205,7 +199,7 @@ def search():
         {final_order_by_clause};
     """
 
-    # 5. Execute query and process results into the desired JSON structure
+    # 5. Execute query and process results
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute(query, tuple(query_params))
@@ -217,7 +211,6 @@ def search():
     if not results:
         return jsonify([])
         
-    # This logic correctly groups all inspections under each unique restaurant
     restaurant_dict = {}
     for row in results:
         camis = str(row['camis'])
@@ -240,7 +233,6 @@ def search():
             if v_data not in restaurant_dict[camis]['inspections'][insp_date_str]['violations']:
                 restaurant_dict[camis]['inspections'][insp_date_str]['violations'].append(v_data)
 
-    # Sort the inspections by date for each restaurant before returning
     final_results = []
     for data in restaurant_dict.values():
         sorted_inspections = sorted(list(data['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
@@ -250,4 +242,29 @@ def search():
     return jsonify(final_results)
 
 # Other endpoints...
-# ... (The rest of the file remains the same) ...
+
+@app.route('/recent', methods=['GET'])
+def recent_restaurants(): return jsonify([])
+
+@app.route('/trigger-update', methods=['POST'])
+def trigger_update():
+    if not update_logic_imported: return jsonify({"status": "error", "message": "Update logic unavailable."}), 500
+    provided_key = request.headers.get('X-Update-Secret')
+    expected_key = APIConfig.UPDATE_SECRET_KEY
+    if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
+        return jsonify({"status": "error", "message": "Unauthorized."}), 403
+    threading.Thread(target=run_database_update, args=(15,), daemon=True).start()
+    return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
+
+@app.errorhandler(404)
+def not_found_error_handler(error): return jsonify({"error": "Endpoint not found"}), 404
+
+@app.errorhandler(500)
+def internal_server_error_handler(error):
+    logger.error(f"Internal Server Error (500): {error}", exc_info=True)
+    return jsonify({"error": "An internal server error occurred"}), 500
+
+if __name__ == "__main__":
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host=host, port=port)
