@@ -1,6 +1,5 @@
-# nixpacks.toml
+# nixpacks.toml (Corrected Version)
 
-# This section tells Railway's build system (Nixpacks) to add extra system packages.
 [phases.setup]
-# We are adding "postgresql-client", which includes the 'psql' command.
-aptPkgs = ["postgresql-client"]
+# This correctly tells the build system to install the PostgreSQL client tools, including psql.
+pkgs = ["postgresql"]
