@@ -92,7 +92,7 @@ def normalize_search_term_for_hybrid(text):
     normalized_text = re.sub(r"\s+", " ", normalized_text)
     return normalized_text.strip()
 
-# In app_search.py, replace the entire search function with this definitive version.
+# In app_search.py, replace the entire search function with this version.
 
 @app.route('/search', methods=['GET'])
 def search():
@@ -101,12 +101,8 @@ def search():
     grade_filter = request.args.get('grade', type=str)
     boro_filter = request.args.get('boro', type=str)
     sort_by = request.args.get('sort', 'relevance', type=str)
-    try:
-        page = int(request.args.get('page', 1))
-        per_page = int(request.args.get('per_page', 25))
-    except (ValueError, TypeError):
-        page = 1
-        per_page = 25
+    page = int(request.args.get('page', 1))
+    per_page = int(request.args.get('per_page', 25))
 
     if not search_term:
         return jsonify([])
@@ -120,9 +116,11 @@ def search():
     if not normalized_search:
         return jsonify([])
 
-    # 3. Build the query's WHERE and ORDER BY clauses and parameter list
+    # 3. Build query components and parameter list
+    # This list will be built in the exact order the placeholders appear in the final query
     params = []
     
+    # --- Subquery WHERE clause ---
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
     params.extend([f"%{normalized_search}%", normalized_search])
 
@@ -135,29 +133,36 @@ def search():
     
     where_clause = " AND ".join(where_conditions)
 
+    # --- Subquery ORDER BY clause ---
     order_by_clause = ""
+    # We create a list of columns to SELECT in the subquery for sorting purposes
+    sort_columns = ["camis", "dba"]
+
     if sort_by == 'name_asc':
         order_by_clause = "ORDER BY dba ASC"
     elif sort_by == 'name_desc':
         order_by_clause = "ORDER BY dba DESC"
     else: # Default relevance
+        sort_columns.append("similarity(dba_normalized_search, %s) as relevance_score")
+        params.append(normalized_search)
         order_by_clause = """
         ORDER BY
             CASE WHEN dba_normalized_search = %s THEN 0
                  WHEN dba_normalized_search ILIKE %s THEN 1
                  ELSE 2
             END,
-            similarity(dba_normalized_search, %s) DESC
+            relevance_score DESC
         """
-        params.extend([normalized_search, f"{normalized_search}%", normalized_search])
+        params.extend([normalized_search, f"{normalized_search}%"])
     
+    # --- Subquery PAGINATION ---
     offset = (page - 1) * per_page
     params.extend([per_page, offset])
 
-    # 4. Construct the final query using a CTE for clarity and reliability
+    # 4. Construct the final query string in a single, clear step
     full_query = f"""
-        WITH paginated_restaurants AS (
-            SELECT camis
+        WITH paginated_camis AS (
+            SELECT {", ".join(sort_columns)}
             FROM (
                 SELECT DISTINCT ON (camis) * FROM restaurants ORDER BY camis, inspection_date DESC
             ) as latest_restaurants
@@ -167,12 +172,12 @@ def search():
         )
         SELECT r.*, v.violation_code, v.violation_description
         FROM restaurants r
-        JOIN paginated_restaurants pr ON r.camis = pr.camis
+        JOIN paginated_camis pc ON r.camis = pc.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        ORDER BY r.camis, r.inspection_date DESC;
+        ORDER BY r.camis, r.inspection_date DESC
     """
 
-    # 5. Execute query and process results
+    # 5. Execute and process results
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute(full_query, tuple(params))
@@ -181,8 +186,7 @@ def search():
         logger.error(f"DB search failed for '{search_term}': {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
-    if not results:
-        return jsonify([])
+    if not results: return jsonify([])
         
     restaurant_dict = {}
     for row in results:
@@ -191,31 +195,14 @@ def search():
             restaurant_data = {k: v for k, v in row.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
             restaurant_dict[camis] = restaurant_data
             restaurant_dict[camis]['inspections'] = {}
-        
         insp_date_str = row['inspection_date'].isoformat()
         if insp_date_str not in restaurant_dict[camis]['inspections']:
-            restaurant_dict[camis]['inspections'][insp_date_str] = {
-                'inspection_date': insp_date_str,
-                'grade': row['grade'],
-                'critical_flag': row['critical_flag'],
-                'inspection_type': row['inspection_type'],
-                'violations': []
-            }
-
+            restaurant_dict[camis]['inspections'][insp_date_str] = {'inspection_date': insp_date_str, 'grade': row['grade'], 'critical_flag': row['critical_flag'], 'inspection_type': row['inspection_type'], 'violations': []}
         if row['violation_code']:
             v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
             if v_data not in restaurant_dict[camis]['inspections'][insp_date_str]['violations']:
                 restaurant_dict[camis]['inspections'][insp_date_str]['violations'].append(v_data)
-
-    final_results = []
-    # To preserve the sort order from the subquery, we need a map of camis to their original order.
-    # However, since the final result is a list of dictionaries, the client-side will handle display order.
-    # For now, let's just group them. The client will receive the correct *set* of restaurants.
-    for data in restaurant_dict.values():
-        sorted_inspections = sorted(list(data['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
-        data['inspections'] = sorted_inspections
-        final_results.append(data)
-        
+    final_results = [{**data, 'inspections': sorted(list(data['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)} for data in restaurant_dict.values()]
     return jsonify(final_results)
 
 # Other endpoints
