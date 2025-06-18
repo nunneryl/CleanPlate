@@ -102,28 +102,23 @@ def search():
     search_term = request.args.get('name', '').strip()
     grade_filter = request.args.get('grade', type=str)
     boro_filter = request.args.get('boro', type=str)
-    sort_by = request.args.get('sort', 'relevance', type=str)
     page = int(request.args.get('page', 1, type=int))
     per_page = int(request.args.get('per_page', 25, type=int))
 
-    # --- CHECKPOINT 1: Log incoming request parameters ---
-    logger.info(f"[BACKEND LOG] Received request: name='{search_term}', grade='{grade_filter}', boro='{boro_filter}', sort='{sort_by}'")
+    # --- Logging Checkpoint ---
+    logger.info(f"[SIMPLIFIED LOG] Received: name='{search_term}', grade='{grade_filter}', boro='{boro_filter}'")
 
     if not search_term:
         return jsonify([])
 
-    # 2. Normalize search term
+    # 2. Normalize search term (synonym logic removed for simplicity)
     normalized_search = normalize_search_term_for_hybrid(search_term)
-    term_for_synonym_check = re.sub(r"\s+", "", normalized_search)
-    if term_for_synonym_check in SEARCH_TERM_SYNONYMS:
-        normalized_search = SEARCH_TERM_SYNONYMS[term_for_synonym_check]
     
     if not normalized_search:
         return jsonify([])
 
-    # 3. Build query components and parameter list
+    # 3. Build parameters and WHERE clause for filtering
     params = []
-    
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
     params.extend([f"%{normalized_search}%", normalized_search])
 
@@ -135,39 +130,20 @@ def search():
         params.append(boro_filter)
     
     where_clause = " AND ".join(where_conditions)
-
-    order_by_clause = ""
-    sort_columns = ["camis", "dba"]
-
-    if sort_by == 'name_asc':
-        order_by_clause = "ORDER BY dba ASC"
-    elif sort_by == 'name_desc':
-        order_by_clause = "ORDER BY dba DESC"
-    else: # Default relevance
-        sort_columns.append("similarity(dba_normalized_search, %s) as relevance_score")
-        params.append(normalized_search)
-        order_by_clause = """
-        ORDER BY
-            CASE WHEN dba_normalized_search = %s THEN 0
-                 WHEN dba_normalized_search ILIKE %s THEN 1
-                 ELSE 2
-            END,
-            relevance_score DESC
-        """
-        params.extend([normalized_search, f"{normalized_search}%"])
     
+    # --- Pagination ---
     offset = (page - 1) * per_page
     params.extend([per_page, offset])
 
-    # 4. Construct the final query string in a single, clear step
+    # 4. Construct a simplified query with a basic, static sort order
     full_query = f"""
         WITH paginated_camis AS (
-            SELECT {", ".join(sort_columns)}
+            SELECT camis
             FROM (
                 SELECT DISTINCT ON (camis) * FROM restaurants ORDER BY camis, inspection_date DESC
             ) as latest_restaurants
             WHERE {where_clause}
-            {order_by_clause}
+            ORDER BY dba ASC -- Using a simple, static sort for this test
             LIMIT %s OFFSET %s
         )
         SELECT r.*, v.violation_code, v.violation_description
@@ -177,20 +153,16 @@ def search():
         ORDER BY r.camis, r.inspection_date DESC;
     """
 
-    # 5. Execute query and process results
+    # 5. Execute and log the query
     try:
-        if DatabaseConnection is None:
-            raise ImportError("DatabaseConnection not available.")
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            # --- CHECKPOINT 2: Log the exact query and parameters before execution ---
             mogrified_query = cursor.mogrify(full_query, tuple(params))
-            logger.info(f"[BACKEND LOG] EXECUTING SQL:\n{mogrified_query.decode('utf-8')}\n")
+            logger.info(f"[SIMPLIFIED LOG] EXECUTING SQL:\n{mogrified_query.decode('utf-8')}\n")
             
             cursor.execute(full_query, tuple(params))
             results = cursor.fetchall()
             
-            # --- CHECKPOINT 3: Log the number of rows returned from DB ---
-            logger.info(f"[BACKEND LOG] Database returned {len(results)} rows.")
+            logger.info(f"[SIMPLIFIED LOG] Database returned {len(results)} rows.")
 
     except Exception as e:
         logger.error(f"DB search failed for '{search_term}': {e}", exc_info=True)
@@ -198,7 +170,7 @@ def search():
 
     if not results: return jsonify([])
         
-    # 6. Process results into the final JSON structure
+    # 6. Process results into the final JSON structure (unchanged)
     restaurant_dict = {}
     for row in results:
         camis = str(row['camis'])
@@ -206,26 +178,16 @@ def search():
             restaurant_data = {k: v for k, v in row.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
             restaurant_dict[camis] = restaurant_data
             restaurant_dict[camis]['inspections'] = {}
-        
         insp_date_str = row['inspection_date'].isoformat()
         if insp_date_str not in restaurant_dict[camis]['inspections']:
-            restaurant_dict[camis]['inspections'][insp_date_str] = {
-                'inspection_date': insp_date_str,
-                'grade': row['grade'],
-                'critical_flag': row['critical_flag'],
-                'inspection_type': row['inspection_type'],
-                'violations': []
-            }
-
+            restaurant_dict[camis]['inspections'][insp_date_str] = {'inspection_date': insp_date_str, 'grade': row['grade'], 'critical_flag': row['critical_flag'], 'inspection_type': row['inspection_type'], 'violations': []}
         if row['violation_code']:
             v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
             if v_data not in restaurant_dict[camis]['inspections'][insp_date_str]['violations']:
                 restaurant_dict[camis]['inspections'][insp_date_str]['violations'].append(v_data)
-
     final_results = [{**data, 'inspections': sorted(list(data['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)} for data in restaurant_dict.values()]
-    
     return jsonify(final_results)
-
+    
 # Other endpoints
 
 @app.route('/recent', methods=['GET'])
