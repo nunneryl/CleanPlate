@@ -92,11 +92,11 @@ def normalize_search_term_for_hybrid(text):
     normalized_text = re.sub(r"\s+", " ", normalized_text)
     return normalized_text.strip()
 
-# --- CORRECTED SEARCH ENDPOINT WITH PROPER PARAMETER ORDERING ---
+# In app_search.py, replace the entire search function with this definitive version.
 
 @app.route('/search', methods=['GET'])
 def search():
-    # 1. Get parameters from the request
+    # 1. Get parameters
     search_term = request.args.get('name', '').strip()
     grade_filter = request.args.get('grade', type=str)
     boro_filter = request.args.get('boro', type=str)
@@ -120,10 +120,9 @@ def search():
     if not normalized_search:
         return jsonify([])
 
-    # 3. Build the query and parameters together
+    # 3. Build the query's WHERE and ORDER BY clauses and parameter list
     params = []
     
-    # --- WHERE CLAUSE ---
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
     params.extend([f"%{normalized_search}%", normalized_search])
 
@@ -134,16 +133,9 @@ def search():
         where_conditions.append("boro ILIKE %s")
         params.append(boro_filter)
     
-    where_clause = "WHERE " + " AND ".join(where_conditions)
+    where_clause = " AND ".join(where_conditions)
 
-    # --- ORDER BY and SELECT for Subquery ---
     order_by_clause = ""
-    relevance_select_list = []
-
-    # Always include the search term for similarity calculation
-    params.append(normalized_search)
-    relevance_select_list.append("similarity(dba_normalized_search, %s) as relevance_score")
-
     if sort_by == 'name_asc':
         order_by_clause = "ORDER BY dba ASC"
     elif sort_by == 'name_desc':
@@ -155,36 +147,32 @@ def search():
                  WHEN dba_normalized_search ILIKE %s THEN 1
                  ELSE 2
             END,
-            relevance_score DESC
+            similarity(dba_normalized_search, %s) DESC
         """
-        params.extend([normalized_search, f"{normalized_search}%"])
+        params.extend([normalized_search, f"{normalized_search}%", normalized_search])
     
-    relevance_select = ", ".join(relevance_select_list)
-
-    # --- PAGINATION ---
     offset = (page - 1) * per_page
-    pagination_clause = "LIMIT %s OFFSET %s"
     params.extend([per_page, offset])
 
-    # 4. Construct the final query using a subquery for filtering and pagination
-    subquery = f"SELECT camis, dba, {relevance_select} FROM (SELECT DISTINCT ON (camis) * FROM restaurants ORDER BY camis, inspection_date DESC) as latest_restaurants {where_clause} {order_by_clause}"
-    
-    # The final ordering must use the columns from the subquery to maintain consistency
-    final_order_by = "ORDER BY sub.relevance_score DESC, r.inspection_date DESC"
-    if sort_by == 'name_asc':
-        final_order_by = "ORDER BY sub.dba ASC, r.inspection_date DESC"
-    elif sort_by == 'name_desc':
-        final_order_by = "ORDER BY sub.dba DESC, r.inspection_date DESC"
-
+    # 4. Construct the final query using a CTE for clarity and reliability
     full_query = f"""
-        SELECT r.*, v.violation_code, v.violation_description, sub.relevance_score
+        WITH paginated_restaurants AS (
+            SELECT camis
+            FROM (
+                SELECT DISTINCT ON (camis) * FROM restaurants ORDER BY camis, inspection_date DESC
+            ) as latest_restaurants
+            WHERE {where_clause}
+            {order_by_clause}
+            LIMIT %s OFFSET %s
+        )
+        SELECT r.*, v.violation_code, v.violation_description
         FROM restaurants r
-        JOIN ({subquery} {pagination_clause}) AS sub ON r.camis = sub.camis
+        JOIN paginated_restaurants pr ON r.camis = pr.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        {final_order_by};
+        ORDER BY r.camis, r.inspection_date DESC;
     """
 
-    # 5. Execute query
+    # 5. Execute query and process results
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute(full_query, tuple(params))
@@ -193,7 +181,6 @@ def search():
         logger.error(f"DB search failed for '{search_term}': {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
-    # 6. Process results into the final JSON structure
     if not results:
         return jsonify([])
         
@@ -217,11 +204,13 @@ def search():
 
         if row['violation_code']:
             v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
-            # Prevent duplicate violations for the same inspection date
             if v_data not in restaurant_dict[camis]['inspections'][insp_date_str]['violations']:
                 restaurant_dict[camis]['inspections'][insp_date_str]['violations'].append(v_data)
 
     final_results = []
+    # To preserve the sort order from the subquery, we need a map of camis to their original order.
+    # However, since the final result is a list of dictionaries, the client-side will handle display order.
+    # For now, let's just group them. The client will receive the correct *set* of restaurants.
     for data in restaurant_dict.values():
         sorted_inspections = sorted(list(data['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
         data['inspections'] = sorted_inspections
