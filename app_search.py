@@ -2,22 +2,17 @@ import os
 import re
 import logging
 import json
-import threading
-import secrets
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, g
 from flask_cors import CORS
 import psycopg2
 import psycopg2.extras
 
-# Local application imports
 try:
     from db_manager import DatabaseConnection
-    from config import APIConfig
-    from update_database import run_database_update
-    update_logic_imported = True
 except ImportError:
-    update_logic_imported = False
-    def run_database_update(*args, **kwargs): pass
+    # This allows the app to run even if db_manager is not found,
+    # though database operations will fail.
+    DatabaseConnection = None
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 logger = logging.getLogger(__name__)
@@ -25,7 +20,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# --- FULL & COMPLETE SYNONYM MAP (from your fixed main branch) ---
+# --- FULL & COMPLETE SYNONYM MAP ---
 SEARCH_TERM_SYNONYMS = {
     'allar': 'all ar', 'allantico': 'all antico', 'amore': 'a more', 'annam': 'an nam',
     'annestccd': 'anne stccd', 'apizza': 'a pizza', 'apou': 'a pou', 'arcteryx': 'arc teryx',
@@ -79,7 +74,7 @@ SEARCH_TERM_SYNONYMS = {
     'sbarro': 'sbarro', 'halalguys': 'the halal guys', 'shakeshack': 'shake shack', 'wholefoods': 'whole foods market', 'traderjoes': 'trader joes'
 }
 
-# --- STABLE NORMALIZATION FUNCTION (From your fixed main branch) ---
+# --- STABLE NORMALIZATION FUNCTION ---
 def normalize_search_term_for_hybrid(text):
     if not isinstance(text, str): return ''
     normalized_text = text.lower().replace('&', ' and ')
@@ -87,13 +82,20 @@ def normalize_search_term_for_hybrid(text):
     for accented, unaccented in accent_map.items():
         normalized_text = normalized_text.replace(accented, unaccented)
     normalized_text = re.sub(r"[']", "", normalized_text)
-    normalized_text = re.sub(r"[./-]", " ", normalized_text)
+    normalized_text = re.sub(r"[.\-/]", " ", normalized_text)
     normalized_text = re.sub(r"[^a-z0-9\s]", "", normalized_text)
     normalized_text = re.sub(r"\s+", " ", normalized_text)
     return normalized_text.strip()
 
-# In app_search.py, replace the entire search function with this version.
+# Teardown function to close the database connection
+@app.teardown_appcontext
+def teardown_db(exception):
+    db_conn = g.pop('db_conn', None)
+    if db_conn is not None:
+        db_conn.close()
+        logger.info("Database connection closed.")
 
+# --- SEARCH ROUTE WITH DETAILED LOGGING ---
 @app.route('/search', methods=['GET'])
 def search():
     # 1. Get parameters
@@ -101,8 +103,11 @@ def search():
     grade_filter = request.args.get('grade', type=str)
     boro_filter = request.args.get('boro', type=str)
     sort_by = request.args.get('sort', 'relevance', type=str)
-    page = int(request.args.get('page', 1))
-    per_page = int(request.args.get('per_page', 25))
+    page = int(request.args.get('page', 1, type=int))
+    per_page = int(request.args.get('per_page', 25, type=int))
+
+    # --- CHECKPOINT 1: Log incoming request parameters ---
+    logger.info(f"[BACKEND LOG] Received request: name='{search_term}', grade='{grade_filter}', boro='{boro_filter}', sort='{sort_by}'")
 
     if not search_term:
         return jsonify([])
@@ -117,10 +122,8 @@ def search():
         return jsonify([])
 
     # 3. Build query components and parameter list
-    # This list will be built in the exact order the placeholders appear in the final query
     params = []
     
-    # --- Subquery WHERE clause ---
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
     params.extend([f"%{normalized_search}%", normalized_search])
 
@@ -133,9 +136,7 @@ def search():
     
     where_clause = " AND ".join(where_conditions)
 
-    # --- Subquery ORDER BY clause ---
     order_by_clause = ""
-    # We create a list of columns to SELECT in the subquery for sorting purposes
     sort_columns = ["camis", "dba"]
 
     if sort_by == 'name_asc':
@@ -155,7 +156,6 @@ def search():
         """
         params.extend([normalized_search, f"{normalized_search}%"])
     
-    # --- Subquery PAGINATION ---
     offset = (page - 1) * per_page
     params.extend([per_page, offset])
 
@@ -174,20 +174,31 @@ def search():
         FROM restaurants r
         JOIN paginated_camis pc ON r.camis = pc.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        ORDER BY r.camis, r.inspection_date DESC
+        ORDER BY r.camis, r.inspection_date DESC;
     """
 
-    # 5. Execute and process results
+    # 5. Execute query and process results
     try:
+        if DatabaseConnection is None:
+            raise ImportError("DatabaseConnection not available.")
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            # --- CHECKPOINT 2: Log the exact query and parameters before execution ---
+            mogrified_query = cursor.mogrify(full_query, tuple(params))
+            logger.info(f"[BACKEND LOG] EXECUTING SQL:\n{mogrified_query.decode('utf-8')}\n")
+            
             cursor.execute(full_query, tuple(params))
             results = cursor.fetchall()
+            
+            # --- CHECKPOINT 3: Log the number of rows returned from DB ---
+            logger.info(f"[BACKEND LOG] Database returned {len(results)} rows.")
+
     except Exception as e:
         logger.error(f"DB search failed for '{search_term}': {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
     if not results: return jsonify([])
         
+    # 6. Process results into the final JSON structure
     restaurant_dict = {}
     for row in results:
         camis = str(row['camis'])
@@ -195,14 +206,24 @@ def search():
             restaurant_data = {k: v for k, v in row.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
             restaurant_dict[camis] = restaurant_data
             restaurant_dict[camis]['inspections'] = {}
+        
         insp_date_str = row['inspection_date'].isoformat()
         if insp_date_str not in restaurant_dict[camis]['inspections']:
-            restaurant_dict[camis]['inspections'][insp_date_str] = {'inspection_date': insp_date_str, 'grade': row['grade'], 'critical_flag': row['critical_flag'], 'inspection_type': row['inspection_type'], 'violations': []}
+            restaurant_dict[camis]['inspections'][insp_date_str] = {
+                'inspection_date': insp_date_str,
+                'grade': row['grade'],
+                'critical_flag': row['critical_flag'],
+                'inspection_type': row['inspection_type'],
+                'violations': []
+            }
+
         if row['violation_code']:
             v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
             if v_data not in restaurant_dict[camis]['inspections'][insp_date_str]['violations']:
                 restaurant_dict[camis]['inspections'][insp_date_str]['violations'].append(v_data)
+
     final_results = [{**data, 'inspections': sorted(list(data['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)} for data in restaurant_dict.values()]
+    
     return jsonify(final_results)
 
 # Other endpoints
