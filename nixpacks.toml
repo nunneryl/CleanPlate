@@ -1,5 +1,5 @@
 # nixpacks.toml
-
+# Forcing a cache clear on deploy - 2025-06-18
 [phases.setup]
 # This line tells the build environment's package manager (apt) to install 
 # the PostgreSQL client, which includes the 'psql' command-line tool.
