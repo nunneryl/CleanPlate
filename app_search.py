@@ -93,9 +93,10 @@ def normalize_search_term_for_hybrid(text):
     return normalized_text.strip()
 
 # --- CORRECTED SEARCH ENDPOINT WITH PROPER PARAMETER ORDERING ---
+
 @app.route('/search', methods=['GET'])
 def search():
-    # 1. Get and validate parameters from the request
+    # 1. Get parameters from the request
     search_term = request.args.get('name', '').strip()
     grade_filter = request.args.get('grade', type=str)
     boro_filter = request.args.get('boro', type=str)
@@ -110,7 +111,7 @@ def search():
     if not search_term:
         return jsonify([])
 
-    # 2. Normalize search term and apply synonyms
+    # 2. Normalize search term
     normalized_search = normalize_search_term_for_hybrid(search_term)
     term_for_synonym_check = re.sub(r"\s+", "", normalized_search)
     if term_for_synonym_check in SEARCH_TERM_SYNONYMS:
@@ -119,37 +120,29 @@ def search():
     if not normalized_search:
         return jsonify([])
 
-    # 3. Build query components and parameter lists in the correct order
+    # 3. Build the query and parameters together
+    params = []
     
-    # Parameters for the WHERE clause
-    where_params = [f"%{normalized_search}%", normalized_search]
+    # --- WHERE CLAUSE ---
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
+    params.extend([f"%{normalized_search}%", normalized_search])
+
     if grade_filter and grade_filter.upper() in ['A', 'B', 'C', 'P', 'Z', 'N']:
         where_conditions.append("grade = %s")
-        where_params.append(grade_filter.upper())
+        params.append(grade_filter.upper())
     if boro_filter:
         where_conditions.append("boro ILIKE %s")
-        where_params.append(boro_filter)
+        params.append(boro_filter)
     where_clause = " AND ".join(where_conditions)
 
-    # Parameters for the ORDER BY clauses
-    cte_order_by_clause = ""
-    final_order_by_clause = ""
-    cte_order_by_params = []
-    final_order_by_params = []
-
+    # --- ORDER BY CLAUSE ---
+    order_by_clause = ""
     if sort_by == 'name_asc':
-        cte_order_by_clause = "ORDER BY dba ASC, dba_normalized_search"
-        final_order_by_clause = "ORDER BY pc.dba ASC, pc.dba_normalized_search, r.inspection_date DESC"
+        order_by_clause = "ORDER BY dba ASC"
     elif sort_by == 'name_desc':
-        cte_order_by_clause = "ORDER BY dba DESC, dba_normalized_search"
-        final_order_by_clause = "ORDER BY pc.dba DESC, pc.dba_normalized_search, r.inspection_date DESC"
-    else: # Default 'relevance'
-        relevance_params = [normalized_search, f"{normalized_search}%", normalized_search]
-        cte_order_by_params = relevance_params
-        final_order_by_params = relevance_params
-        
-        cte_order_by_clause = """
+        order_by_clause = "ORDER BY dba DESC"
+    else: # Default relevance
+        order_by_clause = """
         ORDER BY
             CASE WHEN dba_normalized_search = %s THEN 0
                  WHEN dba_normalized_search ILIKE %s THEN 1
@@ -159,50 +152,34 @@ def search():
             length(dba_normalized_search),
             dba ASC
         """
-        final_order_by_clause = """
-        ORDER BY
-            (CASE WHEN pc.dba_normalized_search = %s THEN 0
-                  WHEN pc.dba_normalized_search ILIKE %s THEN 1
-                  ELSE 2
-             END),
-            similarity(pc.dba_normalized_search, %s) DESC,
-            length(pc.dba_normalized_search),
-            pc.dba ASC,
-            r.inspection_date DESC
-        """
+        params.extend([normalized_search, f"{normalized_search}%", normalized_search])
 
-    # Parameters for pagination
+    # --- PAGINATION ---
     offset = (page - 1) * per_page
-    pagination_params = [per_page, offset]
-    
-    # 4. Assemble the final query and the complete parameter list in the correct order
-    query_params = where_params + cte_order_by_params + pagination_params + final_order_by_params
-    
+    params.extend([per_page, offset])
+
+    # 4. Construct the final query using a subquery for filtering and pagination
     query = f"""
-        WITH latest_restaurants AS (
-            SELECT DISTINCT ON (camis) * FROM restaurants ORDER BY camis, inspection_date DESC
-        ),
-        paginated_camis AS (
-            SELECT camis, dba, dba_normalized_search
-            FROM latest_restaurants
-            WHERE {where_clause}
-            {cte_order_by_clause}
-            LIMIT %s OFFSET %s
-        )
         SELECT 
-            pc.camis, pc.dba, pc.dba_normalized_search, r.boro, r.building, r.street, r.zipcode, r.phone, r.latitude, r.longitude,
-            r.inspection_date, r.critical_flag, r.grade, r.inspection_type,
-            v.violation_code, v.violation_description, r.cuisine_description
-        FROM paginated_camis pc
-        JOIN restaurants r ON pc.camis = r.camis
+            r.*, v.violation_code, v.violation_description
+        FROM restaurants r
+        JOIN (
+            SELECT camis
+            FROM (
+                SELECT DISTINCT ON (camis) * FROM restaurants ORDER BY camis, inspection_date DESC
+            ) as latest_restaurants
+            WHERE {where_clause}
+            {order_by_clause}
+            LIMIT %s OFFSET %s
+        ) AS paginated_camis ON r.camis = paginated_camis.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        {final_order_by_clause};
+        ORDER BY r.camis, r.inspection_date DESC;
     """
 
     # 5. Execute query and process results
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute(query, tuple(query_params))
+            cursor.execute(query, tuple(params))
             results = cursor.fetchall()
     except Exception as e:
         logger.error(f"DB search failed for '{search_term}' with sort '{sort_by}': {e}", exc_info=True)
@@ -211,11 +188,14 @@ def search():
     if not results:
         return jsonify([])
         
+    # The result processing logic remains the same...
     restaurant_dict = {}
     for row in results:
         camis = str(row['camis'])
         if camis not in restaurant_dict:
-            restaurant_dict[camis] = {k: v for k, v in row.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
+            # Create the main restaurant entry, excluding inspection/violation-specific fields
+            restaurant_data = {k: v for k, v in row.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
+            restaurant_dict[camis] = restaurant_data
             restaurant_dict[camis]['inspections'] = {}
         
         insp_date_str = row['inspection_date'].isoformat()
@@ -228,13 +208,13 @@ def search():
                 'violations': []
             }
 
-        if row['violation_code']:
+        if row['violation_code'] and row['violation_code'] not in [v['violation_code'] for v in restaurant_dict[camis]['inspections'][insp_date_str]['violations']]:
             v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
-            if v_data not in restaurant_dict[camis]['inspections'][insp_date_str]['violations']:
-                restaurant_dict[camis]['inspections'][insp_date_str]['violations'].append(v_data)
+            restaurant_dict[camis]['inspections'][insp_date_str]['violations'].append(v_data)
 
     final_results = []
-    for data in restaurant_dict.values():
+    for camis, data in restaurant_dict.items():
+        # Sort inspections by date descending for each restaurant
         sorted_inspections = sorted(list(data['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
         data['inspections'] = sorted_inspections
         final_results.append(data)
