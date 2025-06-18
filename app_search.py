@@ -70,7 +70,7 @@ SEARCH_TERM_SYNONYMS = {
     'stuffd': 'stuff d', 'sugard': 'sugar d', 'taeem': 'ta eem', 'taime': 't aime',
     'takeout': 'take out', 'taverndanny': 'tavern danny', 'tearoom': 'tea room', 'treadz': 'tread z',
     'twigm': 'twig m', 'walkin': 'walk in', 'winemakher': 'winemak her', 'woodfired': 'wood fired',
-    'zaatar': 'za atar', 'zgrill': 'z grill', 'pjclarkes': 'p j clarkes', 'xian': 'xi an',
+    'zaatar': 'za atar', 'zgrill': 'z grill', 'pjclarkes': 'p j clarkes',
     'mcdonalds': 'mcdonalds', 'papajohns': 'papa johns', 'burgerking': 'burger king', 'kfc': 'kfc',
     'popeyes': 'popeyes', 'starbucks': 'starbucks', 'dunkin': 'dunkin', 'chipotle': 'chipotle',
     'subway': 'subway', 'tacobell': 'taco bell', 'pizzahut': 'pizza hut', 'wendys': "wendy's",
