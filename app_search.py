@@ -69,13 +69,13 @@ SEARCH_TERM_SYNONYMS = {
     'stuffd': 'stuff d', 'sugard': 'sugar d', 'taeem': 'ta eem', 'taime': 't aime',
     'takeout': 'take out', 'taverndanny': 'tavern danny', 'tearoom': 'tea room', 'treadz': 'tread z',
     'twigm': 'twig m', 'walkin': 'walk in', 'winemakher': 'winemak her', 'woodfired': 'wood fired',
-    'zaatar': 'za atar', 'zgrill': 'z grill', 'pjclarkes': 'p j clarkes', 'xian': 'xi an',
+    'zaatar': 'za atar', 'zgrill': 'z grill', 'pjclarkes': 'p j clarkes',
     'mcdonalds': 'mcdonalds', 'papajohns': 'papa johns', 'burgerking': 'burger king', 'kfc': 'kfc',
     'popeyes': 'popeyes', 'starbucks': 'starbucks', 'dunkin': 'dunkin', 'chipotle': 'chipotle',
-    'subway': 'subway', 'tacobell': 'taco bell', 'pizzahut': 'pizza hut', 'wendys': "wendy's",
+    'subway': 'subway', 'tacobell': 'taco bell', 'pizzahut': 'pizza hut', 'wendys': 'wendy s',
     'fiveguys': 'five guys', 'chickfila': 'chick fil a', 'panera': 'panera bread', 'cinnabon': 'cinnabon',
     'baskinrobbins': 'baskin robbins', 'haagendazs': 'haagen dazs', 'benandjerrys': 'ben & jerrys',
-    'auntieannes': "auntie anne's", 'pretzeltime': 'pretzel time', 'nathansfamous': "nathan's famous",
+    'auntieannes': 'auntie anne s', 'pretzeltime': 'pretzel time', 'nathansfamous': 'nathan s famous',
     'sbarro': 'sbarro', 'halalguys': 'the halal guys', 'shakeshack': 'shake shack', 'wholefoods': 'whole foods market', 'traderjoes': 'trader joes'
 }
 
@@ -133,10 +133,17 @@ def search():
     if boro_filter:
         where_conditions.append("boro ILIKE %s")
         params.append(boro_filter)
-    where_clause = " AND ".join(where_conditions)
+    
+    where_clause = "WHERE " + " AND ".join(where_conditions)
 
-    # --- ORDER BY CLAUSE ---
+    # --- ORDER BY and SELECT for Subquery ---
     order_by_clause = ""
+    relevance_select_list = []
+
+    # Always include the search term for similarity calculation
+    params.append(normalized_search)
+    relevance_select_list.append("similarity(dba_normalized_search, %s) as relevance_score")
+
     if sort_by == 'name_asc':
         order_by_clause = "ORDER BY dba ASC"
     elif sort_by == 'name_desc':
@@ -148,52 +155,52 @@ def search():
                  WHEN dba_normalized_search ILIKE %s THEN 1
                  ELSE 2
             END,
-            similarity(dba_normalized_search, %s) DESC,
-            length(dba_normalized_search),
-            dba ASC
+            relevance_score DESC
         """
-        params.extend([normalized_search, f"{normalized_search}%", normalized_search])
+        params.extend([normalized_search, f"{normalized_search}%"])
+    
+    relevance_select = ", ".join(relevance_select_list)
 
     # --- PAGINATION ---
     offset = (page - 1) * per_page
+    pagination_clause = "LIMIT %s OFFSET %s"
     params.extend([per_page, offset])
 
     # 4. Construct the final query using a subquery for filtering and pagination
-    query = f"""
-        SELECT 
-            r.*, v.violation_code, v.violation_description
+    subquery = f"SELECT camis, dba, {relevance_select} FROM (SELECT DISTINCT ON (camis) * FROM restaurants ORDER BY camis, inspection_date DESC) as latest_restaurants {where_clause} {order_by_clause}"
+    
+    # The final ordering must use the columns from the subquery to maintain consistency
+    final_order_by = "ORDER BY sub.relevance_score DESC, r.inspection_date DESC"
+    if sort_by == 'name_asc':
+        final_order_by = "ORDER BY sub.dba ASC, r.inspection_date DESC"
+    elif sort_by == 'name_desc':
+        final_order_by = "ORDER BY sub.dba DESC, r.inspection_date DESC"
+
+    full_query = f"""
+        SELECT r.*, v.violation_code, v.violation_description, sub.relevance_score
         FROM restaurants r
-        JOIN (
-            SELECT camis
-            FROM (
-                SELECT DISTINCT ON (camis) * FROM restaurants ORDER BY camis, inspection_date DESC
-            ) as latest_restaurants
-            WHERE {where_clause}
-            {order_by_clause}
-            LIMIT %s OFFSET %s
-        ) AS paginated_camis ON r.camis = paginated_camis.camis
+        JOIN ({subquery} {pagination_clause}) AS sub ON r.camis = sub.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        ORDER BY r.camis, r.inspection_date DESC;
+        {final_order_by};
     """
 
-    # 5. Execute query and process results
+    # 5. Execute query
     try:
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute(query, tuple(params))
+            cursor.execute(full_query, tuple(params))
             results = cursor.fetchall()
     except Exception as e:
-        logger.error(f"DB search failed for '{search_term}' with sort '{sort_by}': {e}", exc_info=True)
+        logger.error(f"DB search failed for '{search_term}': {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
+    # 6. Process results into the final JSON structure
     if not results:
         return jsonify([])
         
-    # The result processing logic remains the same...
     restaurant_dict = {}
     for row in results:
         camis = str(row['camis'])
         if camis not in restaurant_dict:
-            # Create the main restaurant entry, excluding inspection/violation-specific fields
             restaurant_data = {k: v for k, v in row.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
             restaurant_dict[camis] = restaurant_data
             restaurant_dict[camis]['inspections'] = {}
@@ -208,20 +215,21 @@ def search():
                 'violations': []
             }
 
-        if row['violation_code'] and row['violation_code'] not in [v['violation_code'] for v in restaurant_dict[camis]['inspections'][insp_date_str]['violations']]:
+        if row['violation_code']:
             v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
-            restaurant_dict[camis]['inspections'][insp_date_str]['violations'].append(v_data)
+            # Prevent duplicate violations for the same inspection date
+            if v_data not in restaurant_dict[camis]['inspections'][insp_date_str]['violations']:
+                restaurant_dict[camis]['inspections'][insp_date_str]['violations'].append(v_data)
 
     final_results = []
-    for camis, data in restaurant_dict.items():
-        # Sort inspections by date descending for each restaurant
+    for data in restaurant_dict.values():
         sorted_inspections = sorted(list(data['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
         data['inspections'] = sorted_inspections
         final_results.append(data)
         
     return jsonify(final_results)
 
-# Other endpoints...
+# Other endpoints
 
 @app.route('/recent', methods=['GET'])
 def recent_restaurants(): return jsonify([])
