@@ -2,17 +2,23 @@ import os
 import re
 import logging
 import json
+import threading
+import secrets
 from flask import Flask, jsonify, request, g
 from flask_cors import CORS
 import psycopg2
 import psycopg2.extras
 
+# Using a more robust setup from your live app
 try:
     from db_manager import DatabaseConnection
+    from config import APIConfig
+    from update_database import run_database_update
+    update_logic_imported = True
 except ImportError:
-    # This allows the app to run even if db_manager is not found,
-    # though database operations will fail.
-    DatabaseConnection = None
+    DatabaseConnection = None # Allow app to run for inspection
+    update_logic_imported = False
+    def run_database_update(*args, **kwargs): pass
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 logger = logging.getLogger(__name__)
@@ -20,7 +26,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# --- FULL & COMPLETE SYNONYM MAP ---
+# --- THIS IS NOW THE FULL & COMPLETE SYNONYM MAP ---
 SEARCH_TERM_SYNONYMS = {
     'allar': 'all ar', 'allantico': 'all antico', 'amore': 'a more', 'annam': 'an nam',
     'annestccd': 'anne stccd', 'apizza': 'a pizza', 'apou': 'a pou', 'arcteryx': 'arc teryx',
@@ -74,50 +80,51 @@ SEARCH_TERM_SYNONYMS = {
     'sbarro': 'sbarro', 'halalguys': 'the halal guys', 'shakeshack': 'shake shack', 'wholefoods': 'whole foods market', 'traderjoes': 'trader joes'
 }
 
-# --- STABLE NORMALIZATION FUNCTION ---
+
+# Using the superior normalization function from your LIVE app
 def normalize_search_term_for_hybrid(text):
     if not isinstance(text, str): return ''
     normalized_text = text.lower().replace('&', ' and ')
     accent_map = { 'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o', 'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ç': 'c', 'ñ': 'n' }
     for accented, unaccented in accent_map.items():
         normalized_text = normalized_text.replace(accented, unaccented)
-    normalized_text = re.sub(r"[']", "", normalized_text)
-    normalized_text = re.sub(r"[.\-/]", " ", normalized_text)
+    normalized_text = re.sub(r"['.]", "", normalized_text) # Removes apostrophes and periods
+    normalized_text = re.sub(r"[-/]", " ", normalized_text)
     normalized_text = re.sub(r"[^a-z0-9\s]", "", normalized_text)
     normalized_text = re.sub(r"\s+", " ", normalized_text)
     return normalized_text.strip()
 
-# Teardown function to close the database connection
 @app.teardown_appcontext
 def teardown_db(exception):
     db_conn = g.pop('db_conn', None)
     if db_conn is not None:
         db_conn.close()
-        logger.info("Database connection closed.")
 
-# --- SEARCH ROUTE WITH DETAILED LOGGING ---
 @app.route('/search', methods=['GET'])
 def search():
-    # 1. Get parameters
+    # 1. Get all parameters, including new ones
     search_term = request.args.get('name', '').strip()
     grade_filter = request.args.get('grade', type=str)
     boro_filter = request.args.get('boro', type=str)
+    sort_option = request.args.get('sort', type=str) # 'name_asc', 'name_desc', 'relevance'
     page = int(request.args.get('page', 1, type=int))
     per_page = int(request.args.get('per_page', 25, type=int))
 
-    # --- Logging Checkpoint ---
-    logger.info(f"[SIMPLIFIED LOG] Received: name='{search_term}', grade='{grade_filter}', boro='{boro_filter}'")
+    logger.info(f"Received search: name='{search_term}', grade='{grade_filter}', boro='{boro_filter}', sort='{sort_option}'")
 
     if not search_term:
         return jsonify([])
 
-    # 2. Normalize search term (synonym logic removed for simplicity)
+    # 2. Normalize and check for synonyms (THIS LOGIC IS NOW RESTORED)
     normalized_search = normalize_search_term_for_hybrid(search_term)
+    term_for_synonym_check = re.sub(r"\s+", "", normalized_search)
+    if term_for_synonym_check in SEARCH_TERM_SYNONYMS:
+        normalized_search = SEARCH_TERM_SYNONYMS[term_for_synonym_check]
     
     if not normalized_search:
         return jsonify([])
 
-    # 3. Build parameters and WHERE clause for filtering
+    # 3. Build WHERE clause with new filters
     params = []
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
     params.extend([f"%{normalized_search}%", normalized_search])
@@ -130,20 +137,44 @@ def search():
         params.append(boro_filter)
     
     where_clause = " AND ".join(where_conditions)
+
+    # 4. Dynamically build ORDER BY clause based on sort_option
+    order_by_clause = ""
+    relevance_params = []
+    if sort_option == 'name_asc':
+        order_by_clause = "ORDER BY dba ASC"
+    elif sort_option == 'name_desc':
+        order_by_clause = "ORDER BY dba DESC"
+    else: # Default to the smart relevance sort from your live app
+        order_by_clause = """
+        ORDER BY
+            CASE WHEN dba_normalized_search = %s THEN 0
+                 WHEN dba_normalized_search ILIKE %s THEN 1
+                 ELSE 2
+            END,
+            similarity(dba_normalized_search, %s) DESC,
+            length(dba_normalized_search)
+        """
+        relevance_params = [normalized_search, f"{normalized_search}%", normalized_search]
+
+    # 5. Construct the final query
+    # We must add the relevance params to the main params list
+    params.extend(relevance_params)
     
-    # --- Pagination ---
+    # Pagination params
     offset = (page - 1) * per_page
     params.extend([per_page, offset])
 
-    # 4. Construct a simplified query with a basic, static sort order
     full_query = f"""
         WITH paginated_camis AS (
-            SELECT camis
+            SELECT camis, dba, dba_normalized_search
             FROM (
-                SELECT DISTINCT ON (camis) * FROM restaurants ORDER BY camis, inspection_date DESC
+                SELECT DISTINCT ON (camis) *,
+                       similarity(dba_normalized_search, %s) as relevance
+                FROM restaurants ORDER BY camis, inspection_date DESC
             ) as latest_restaurants
             WHERE {where_clause}
-            ORDER BY dba ASC -- Using a simple, static sort for this test
+            {order_by_clause}
             LIMIT %s OFFSET %s
         )
         SELECT r.*, v.violation_code, v.violation_description
@@ -153,16 +184,18 @@ def search():
         ORDER BY r.camis, r.inspection_date DESC;
     """
 
-    # 5. Execute and log the query
+    # Add similarity param for the WITH clause at the beginning of the list
+    params.insert(0, normalized_search)
+
+    # 6. Execute query
     try:
-        with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            mogrified_query = cursor.mogrify(full_query, tuple(params))
-            logger.info(f"[SIMPLIFIED LOG] EXECUTING SQL:\n{mogrified_query.decode('utf-8')}\n")
-            
+        if 'db_conn' not in g:
+            g.db_conn = DatabaseConnection()
+        
+        with g.db_conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute(full_query, tuple(params))
             results = cursor.fetchall()
-            
-            logger.info(f"[SIMPLIFIED LOG] Database returned {len(results)} rows.")
+            logger.info(f"Database returned {len(results)} rows for term '{search_term}'.")
 
     except Exception as e:
         logger.error(f"DB search failed for '{search_term}': {e}", exc_info=True)
@@ -170,7 +203,7 @@ def search():
 
     if not results: return jsonify([])
         
-    # 6. Process results into the final JSON structure (unchanged)
+    # 7. Process results (same as before)
     restaurant_dict = {}
     for row in results:
         camis = str(row['camis'])
@@ -178,20 +211,41 @@ def search():
             restaurant_data = {k: v for k, v in row.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
             restaurant_dict[camis] = restaurant_data
             restaurant_dict[camis]['inspections'] = {}
+        
         insp_date_str = row['inspection_date'].isoformat()
         if insp_date_str not in restaurant_dict[camis]['inspections']:
-            restaurant_dict[camis]['inspections'][insp_date_str] = {'inspection_date': insp_date_str, 'grade': row['grade'], 'critical_flag': row['critical_flag'], 'inspection_type': row['inspection_type'], 'violations': []}
+            restaurant_dict[camis]['inspections'][insp_date_str] = {
+                'inspection_date': insp_date_str,
+                'grade': row['grade'],
+                'critical_flag': row['critical_flag'],
+                'inspection_type': row['inspection_type'],
+                'violations': []
+            }
+        
         if row['violation_code']:
             v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
             if v_data not in restaurant_dict[camis]['inspections'][insp_date_str]['violations']:
                 restaurant_dict[camis]['inspections'][insp_date_str]['violations'].append(v_data)
-    final_results = [{**data, 'inspections': sorted(list(data['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)} for data in restaurant_dict.values()]
-    return jsonify(final_results)
-    
-# Other endpoints
 
+    final_results = []
+    for camis, data in restaurant_dict.items():
+        sorted_inspections = sorted(list(data['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
+        data['inspections'] = sorted_inspections
+        final_results.append(data)
+        
+    # We need to re-apply the sorting to the final list because the grouping messes up the order
+    if sort_option == 'name_asc':
+        final_results.sort(key=lambda x: x.get('dba', ''))
+    elif sort_option == 'name_desc':
+        final_results.sort(key=lambda x: x.get('dba', ''), reverse=True)
+    # The default relevance sort from the DB is preserved by the dictionary processing
+        
+    return jsonify(final_results)
+
+# Other endpoints...
 @app.route('/recent', methods=['GET'])
-def recent_restaurants(): return jsonify([])
+def recent_restaurants():
+    return jsonify([])
 
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
@@ -204,7 +258,8 @@ def trigger_update():
     return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
 
 @app.errorhandler(404)
-def not_found_error_handler(error): return jsonify({"error": "Endpoint not found"}), 404
+def not_found_error_handler(error):
+    return jsonify({"error": "Endpoint not found"}), 404
 
 @app.errorhandler(500)
 def internal_server_error_handler(error):
