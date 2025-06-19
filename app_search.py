@@ -9,16 +9,14 @@ from flask_cors import CORS
 import psycopg2
 import psycopg2.extras
 
-# This block is now corrected to match the safe error-handling of your live app.
 try:
     from db_manager import DatabaseConnection
     from config import APIConfig
     from update_database import run_database_update
     update_logic_imported = True
 except ImportError as e:
-    # This now only disables the update logic on failure, it does NOT disable the database.
     logging.warning(f"An import failed, some features may be disabled. Error: {e}")
-    DatabaseConnection = None # This will be re-imported within the search function if needed.
+    DatabaseConnection = None
     update_logic_imported = False
     def run_database_update(*args, **kwargs): pass
 
@@ -134,13 +132,19 @@ def search():
     
     where_clause = " AND ".join(where_conditions)
 
+    # --- THIS IS THE UPDATED SORTING LOGIC ---
     order_by_clause = ""
     relevance_params = []
     if sort_option == 'name_asc':
         order_by_clause = "ORDER BY dba ASC"
     elif sort_option == 'name_desc':
         order_by_clause = "ORDER BY dba DESC"
-    else:
+    elif sort_option == 'date_desc':
+        order_by_clause = "ORDER BY inspection_date DESC"
+    elif sort_option == 'grade_asc':
+        # This CASE statement creates a custom sort order for grades
+        order_by_clause = "ORDER BY CASE WHEN grade = 'A' THEN 1 WHEN grade = 'B' THEN 2 WHEN grade = 'C' THEN 3 ELSE 4 END, dba ASC"
+    else: # Default to the smart relevance sort
         order_by_clause = """
         ORDER BY
             CASE WHEN dba_normalized_search = %s THEN 0
@@ -158,7 +162,7 @@ def search():
 
     full_query = f"""
         WITH paginated_camis AS (
-            SELECT camis, dba, dba_normalized_search
+            SELECT camis, dba, dba_normalized_search, inspection_date, grade
             FROM (
                 SELECT DISTINCT ON (camis) *,
                        similarity(dba_normalized_search, %s) as relevance
@@ -177,7 +181,6 @@ def search():
     params.insert(0, normalized_search)
 
     try:
-        # Re-import DatabaseConnection here to ensure it's available
         from db_manager import DatabaseConnection
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute(full_query, tuple(params))
@@ -214,13 +217,10 @@ def search():
     for res in final_results:
         res['inspections'] = sorted(list(res['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
     
-    # Re-sort the final processed list to ensure order is correct after grouping
     if sort_option == 'name_asc':
         final_results.sort(key=lambda x: x.get('dba', ''))
     elif sort_option == 'name_desc':
         final_results.sort(key=lambda x: x.get('dba', ''), reverse=True)
-    # Note: The smart relevance sort is complex and happens in the DB.
-    # The grouping by camis can disrupt this. For now, this is a known limitation.
         
     return jsonify(final_results)
     
