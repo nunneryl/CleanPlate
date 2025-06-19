@@ -132,7 +132,6 @@ def search():
     
     where_clause = " AND ".join(where_conditions)
 
-    # --- THIS IS THE UPDATED SORTING LOGIC ---
     order_by_clause = ""
     relevance_params = []
     if sort_option == 'name_asc':
@@ -142,9 +141,8 @@ def search():
     elif sort_option == 'date_desc':
         order_by_clause = "ORDER BY inspection_date DESC"
     elif sort_option == 'grade_asc':
-        # This CASE statement creates a custom sort order for grades
         order_by_clause = "ORDER BY CASE WHEN grade = 'A' THEN 1 WHEN grade = 'B' THEN 2 WHEN grade = 'C' THEN 3 ELSE 4 END, dba ASC"
-    else: # Default to the smart relevance sort
+    else:
         order_by_clause = """
         ORDER BY
             CASE WHEN dba_normalized_search = %s THEN 0
@@ -217,10 +215,25 @@ def search():
     for res in final_results:
         res['inspections'] = sorted(list(res['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
     
+    # --- THIS IS THE FINAL SORTING FIX ---
+    # Re-sort the final list to ensure order is correct after grouping by camis
     if sort_option == 'name_asc':
         final_results.sort(key=lambda x: x.get('dba', ''))
     elif sort_option == 'name_desc':
         final_results.sort(key=lambda x: x.get('dba', ''), reverse=True)
+    elif sort_option == 'date_desc':
+        # Sort by the first inspection date, which is the newest since they are pre-sorted within each restaurant
+        final_results.sort(key=lambda x: x['inspections'][0]['inspection_date'] if x.get('inspections') else '1900-01-01', reverse=True)
+    elif sort_option == 'grade_asc':
+        # Use a helper function for clarity to define the custom grade order
+        def grade_sort_key(restaurant):
+            if not restaurant.get('inspections'):
+                return 5 # Restaurants with no inspection data go last
+            grade = restaurant['inspections'][0].get('grade', 'Z') # Default to Z if no grade
+            order = {'A': 1, 'B': 2, 'C': 3}
+            return order.get(grade, 4) # A, B, C first, everything else after
+        final_results.sort(key=grade_sort_key)
+    # The default relevance sort from the DB should be mostly preserved, this is the best effort
         
     return jsonify(final_results)
     
