@@ -9,6 +9,7 @@ from flask_cors import CORS
 import psycopg2
 import psycopg2.extras
 
+# The top-level try/except block now handles all necessary imports
 try:
     from db_manager import DatabaseConnection
     from config import APIConfig
@@ -99,7 +100,6 @@ def teardown_db(exception):
 
 @app.route('/search', methods=['GET'])
 def search():
-    # ... (search function remains unchanged)
     search_term = request.args.get('name', '').strip()
     grade_filter = request.args.get('grade', type=str)
     boro_filter = request.args.get('boro', type=str)
@@ -173,7 +173,9 @@ def search():
     final_params = tuple(where_params + relevance_params)
 
     try:
-        from db_manager import DatabaseConnection
+        if DatabaseConnection is None:
+            from db_manager import DatabaseConnection
+        
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute(full_query, final_params)
             all_matching_restaurants = cursor.fetchall()
@@ -224,7 +226,6 @@ def search():
 
     return jsonify(list(restaurant_dict.values()))
 
-# --- NEW ENDPOINT TO GET CUISINE TYPES ---
 @app.route('/cuisines', methods=['GET'])
 def get_cuisines():
     """Fetches a sorted list of unique cuisine descriptions from the database."""
@@ -235,18 +236,18 @@ def get_cuisines():
         ORDER BY cuisine_description ASC;
     """
     try:
-        from db_manager import DatabaseConnection
+        # Use the same connection management as the search endpoint
+        if DatabaseConnection is None:
+            from db_manager import DatabaseConnection
+
         with DatabaseConnection() as conn, conn.cursor() as cursor:
             cursor.execute(query)
-            # The result will be a list of tuples, e.g., [('American',), ('Italian',)]
-            # We need to flatten it into a simple list of strings.
             cuisines = [row[0] for row in cursor.fetchall()]
             return jsonify(cuisines)
     except Exception as e:
         logger.error(f"Failed to fetch cuisine list: {e}", exc_info=True)
         return jsonify({"error": "Could not retrieve cuisine list"}), 500
 
-# Other endpoints...
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
     return jsonify([])
