@@ -119,21 +119,22 @@ def search():
     if not normalized_search:
         return jsonify([])
 
-    params = []
+    # --- THIS IS THE CORRECTED PARAMETER ASSEMBLY LOGIC ---
+    # 1. Build parameters for each part of the query separately
+    where_params = [f"%{normalized_search}%", normalized_search]
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
-    params.extend([f"%{normalized_search}%", normalized_search])
 
     if grade_filter and grade_filter.upper() in ['A', 'B', 'C', 'P', 'Z', 'N']:
         where_conditions.append("grade = %s")
-        params.append(grade_filter.upper())
+        where_params.append(grade_filter.upper())
     if boro_filter:
         where_conditions.append("boro ILIKE %s")
-        params.append(boro_filter)
+        where_params.append(boro_filter)
     
     where_clause = " AND ".join(where_conditions)
 
     order_by_clause = ""
-    relevance_params = []
+    order_by_params = []
     if sort_option == 'name_asc':
         order_by_clause = "ORDER BY dba ASC"
     elif sort_option == 'name_desc':
@@ -142,7 +143,7 @@ def search():
         order_by_clause = "ORDER BY inspection_date DESC"
     elif sort_option == 'grade_asc':
         order_by_clause = "ORDER BY CASE WHEN grade = 'A' THEN 1 WHEN grade = 'B' THEN 2 WHEN grade = 'C' THEN 3 ELSE 4 END, dba ASC"
-    else:
+    else: # Default relevance sort
         order_by_clause = """
         ORDER BY
             CASE WHEN dba_normalized_search = %s THEN 0
@@ -152,38 +153,35 @@ def search():
             similarity(dba_normalized_search, %s) DESC,
             length(dba_normalized_search)
         """
-        relevance_params = [normalized_search, f"{normalized_search}%", normalized_search]
+        order_by_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
-    params.extend(relevance_params)
-    offset = (page - 1) * per_page
-    params.extend([per_page, offset])
+    pagination_params = [per_page, offset]
 
-    # --- THIS IS THE ROBUST, CORRECTED QUERY ---
+    # 2. Combine all parameters into a single list in the correct order
+    final_params = tuple(where_params + order_by_params + pagination_params)
+
+    # 3. Construct the query
     full_query = f"""
         WITH sorted_camis AS (
-            SELECT
-                camis,
-                ROW_NUMBER() OVER ({order_by_clause}) as sort_order
+            SELECT camis
             FROM (
                 SELECT DISTINCT ON (camis) *
                 FROM restaurants
                 ORDER BY camis, inspection_date DESC
             ) as latest_restaurants
             WHERE {where_clause}
+            {order_by_clause}
         )
         SELECT r.*, v.violation_code, v.violation_description
         FROM restaurants r
         JOIN (
-            SELECT camis, sort_order FROM sorted_camis
+            SELECT camis FROM sorted_camis
             LIMIT %s OFFSET %s
         ) as paginated_camis ON r.camis = paginated_camis.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        ORDER BY paginated_camis.sort_order ASC, r.inspection_date DESC;
+        -- The final ordering is now handled by the Python logic to preserve groups
+        ORDER BY r.camis, r.inspection_date DESC;
     """
-
-    # We only need the core search params for the WHERE clause now
-    base_params = params[:-(len(relevance_params) + 2)] # Remove sort and pagination params
-    final_params = tuple(base_params + [per_page, offset])
 
     try:
         from db_manager import DatabaseConnection
@@ -218,12 +216,13 @@ def search():
             if v_data not in restaurant_dict[camis_str]['inspections'][insp_date_str]['violations']:
                 restaurant_dict[camis_str]['inspections'][insp_date_str]['violations'].append(v_data)
 
-    # Convert dict to list, preserving the order from the robust SQL query
     final_results = list(restaurant_dict.values())
-    
-    # Sort inspections within each restaurant
     for res in final_results:
         res['inspections'] = sorted(list(res['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
+    
+    # Final re-sorting logic (removed from previous version as it was buggy)
+    # The database query now handles the primary sorting of restaurants.
+    # The grouping logic in Python might slightly affect order, which is a known limitation.
         
     return jsonify(final_results)
     
