@@ -1,5 +1,3 @@
-# update_database.py (Definitive Version)
-
 import os
 import re
 import requests
@@ -10,9 +8,8 @@ from dateutil.parser import parse as date_parse
 import psycopg2
 import psycopg2.extras
 
-# Import the normalization function from app_search
-# Note: This creates a dependency, ensure app_search.py is accessible
-from app_search import normalize_search_term_for_hybrid
+# Import the normalization function from its new, neutral home
+from utils import normalize_search_term_for_hybrid
 
 from db_manager import DatabaseConnection
 from config import APIConfig
@@ -53,6 +50,7 @@ def update_database_batch(data):
         if not (camis and inspection_date): continue
         
         dba = item.get("dba")
+        # Use the imported normalization function
         normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
 
         restaurants_to_insert.append((
