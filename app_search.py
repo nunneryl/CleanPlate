@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# The full synonym map is still here
 SEARCH_TERM_SYNONYMS = { 'pjclarkes': 'p j clarkes', 'mcdonalds': 'mcdonalds', } # Truncated for display
 
 @app.teardown_appcontext
@@ -44,17 +43,11 @@ def search():
     page = int(request.args.get('page', 1, type=int))
     per_page = int(request.args.get('per_page', 25, type=int))
 
-    logger.info(f"Received search: name='{search_term}', grade='{grade_filter}', boro='{boro_filter}', cuisine='{cuisine_filter}', sort='{sort_option}'")
-
     if not search_term:
         return jsonify([])
 
     normalized_search = normalize_search_term_for_hybrid(search_term)
-    # Synonym logic can be applied here if needed
-
-    # --- QUERY LOGIC REWRITTEN FOR PERFORMANCE ---
-
-    # 1. Build WHERE clause and parameters
+    
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
     params = [f"%{normalized_search}%", normalized_search]
 
@@ -70,7 +63,6 @@ def search():
     
     where_clause = " AND ".join(where_conditions)
 
-    # 2. Build ORDER BY clause and its specific parameters
     order_by_clause = ""
     order_by_params = []
     if sort_option == 'name_asc':
@@ -93,8 +85,6 @@ def search():
         """
         order_by_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
-    # 3. First Query: Get ONLY the IDs of the restaurants for the current page.
-    # This is fast because it filters and sorts on a smaller set of columns.
     id_fetch_query = f"""
         SELECT camis FROM (
             SELECT DISTINCT ON (camis) camis, dba, dba_normalized_search, grade, inspection_date, cuisine_description, boro
@@ -117,35 +107,31 @@ def search():
             if not paginated_camis_tuples:
                 return jsonify([])
 
-            # Flatten list of tuples to list of IDs
             paginated_camis = [item[0] for item in paginated_camis_tuples]
-
-            # 4. Second Query: Get the full details for ONLY the paginated IDs.
+            
             details_query = """
                 SELECT r.*, v.violation_code, v.violation_description
                 FROM restaurants r
                 LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
                 WHERE r.camis = ANY(%s)
             """
-            cursor.execute(details_query, (paginated_camis,))
-            all_rows = cursor.fetchall()
+            # ** THE FIX IS HERE: Use DictCursor for the details query **
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as details_cursor:
+                details_cursor.execute(details_query, (paginated_camis,))
+                all_rows = details_cursor.fetchall()
 
     except Exception as e:
         logger.error(f"DB search failed for '{search_term}': {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
-    # 5. Process results into the final JSON, ensuring the original sort order is preserved.
-    # Create a dictionary lookup for quick access
     restaurant_details_map = {str(camis): [] for camis in paginated_camis}
     for row in all_rows:
         restaurant_details_map[str(row['camis'])].append(row)
 
     final_results = []
-    for camis in paginated_camis: # Iterate in the correct sorted order
+    for camis in paginated_camis:
         camis_str = str(camis)
         rows_for_restaurant = restaurant_details_map[camis_str]
-        
-        # Take base restaurant info from the first row (most recent inspection)
         base_info = dict(rows_for_restaurant[0])
         
         inspections = {}
@@ -163,13 +149,15 @@ def search():
                     inspections[insp_date_str]['violations'].append(v_data)
 
         base_info['inspections'] = sorted(list(inspections.values()), key=lambda x: x['inspection_date'], reverse=True)
-        # Remove individual inspection fields from the top level
         for key in ['violation_code', 'violation_description', 'grade', 'inspection_date', 'critical_flag', 'inspection_type']:
             base_info.pop(key, None)
             
         final_results.append(base_info)
         
     return jsonify(final_results)
+
+# Other endpoints remain the same
+# ...
 
 
 @app.route('/recent', methods=['GET'])
