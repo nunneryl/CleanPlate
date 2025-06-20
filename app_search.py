@@ -158,30 +158,37 @@ def search():
     offset = (page - 1) * per_page
     params.extend([per_page, offset])
 
+    # --- THIS IS THE ROBUST, CORRECTED QUERY ---
     full_query = f"""
-        WITH paginated_camis AS (
-            SELECT camis, dba, dba_normalized_search, inspection_date, grade
+        WITH sorted_camis AS (
+            SELECT
+                camis,
+                ROW_NUMBER() OVER ({order_by_clause}) as sort_order
             FROM (
-                SELECT DISTINCT ON (camis) *,
-                       similarity(dba_normalized_search, %s) as relevance
-                FROM restaurants ORDER BY camis, inspection_date DESC
+                SELECT DISTINCT ON (camis) *
+                FROM restaurants
+                ORDER BY camis, inspection_date DESC
             ) as latest_restaurants
             WHERE {where_clause}
-            {order_by_clause}
-            LIMIT %s OFFSET %s
         )
         SELECT r.*, v.violation_code, v.violation_description
         FROM restaurants r
-        JOIN paginated_camis pc ON r.camis = pc.camis
+        JOIN (
+            SELECT camis, sort_order FROM sorted_camis
+            LIMIT %s OFFSET %s
+        ) as paginated_camis ON r.camis = paginated_camis.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        ORDER BY r.camis, r.inspection_date DESC;
+        ORDER BY paginated_camis.sort_order ASC, r.inspection_date DESC;
     """
-    params.insert(0, normalized_search)
+
+    # We only need the core search params for the WHERE clause now
+    base_params = params[:-(len(relevance_params) + 2)] # Remove sort and pagination params
+    final_params = tuple(base_params + [per_page, offset])
 
     try:
         from db_manager import DatabaseConnection
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute(full_query, tuple(params))
+            cursor.execute(full_query, final_params)
             results = cursor.fetchall()
             logger.info(f"Database returned {len(results)} rows for term '{search_term}'.")
 
@@ -211,29 +218,12 @@ def search():
             if v_data not in restaurant_dict[camis_str]['inspections'][insp_date_str]['violations']:
                 restaurant_dict[camis_str]['inspections'][insp_date_str]['violations'].append(v_data)
 
+    # Convert dict to list, preserving the order from the robust SQL query
     final_results = list(restaurant_dict.values())
+    
+    # Sort inspections within each restaurant
     for res in final_results:
         res['inspections'] = sorted(list(res['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
-    
-    # --- THIS IS THE FINAL SORTING FIX ---
-    # Re-sort the final list to ensure order is correct after grouping by camis
-    if sort_option == 'name_asc':
-        final_results.sort(key=lambda x: x.get('dba', ''))
-    elif sort_option == 'name_desc':
-        final_results.sort(key=lambda x: x.get('dba', ''), reverse=True)
-    elif sort_option == 'date_desc':
-        # Sort by the first inspection date, which is the newest since they are pre-sorted within each restaurant
-        final_results.sort(key=lambda x: x['inspections'][0]['inspection_date'] if x.get('inspections') else '1900-01-01', reverse=True)
-    elif sort_option == 'grade_asc':
-        # Use a helper function for clarity to define the custom grade order
-        def grade_sort_key(restaurant):
-            if not restaurant.get('inspections'):
-                return 5 # Restaurants with no inspection data go last
-            grade = restaurant['inspections'][0].get('grade', 'Z') # Default to Z if no grade
-            order = {'A': 1, 'B': 2, 'C': 3}
-            return order.get(grade, 4) # A, B, C first, everything else after
-        final_results.sort(key=grade_sort_key)
-    # The default relevance sort from the DB should be mostly preserved, this is the best effort
         
     return jsonify(final_results)
     
