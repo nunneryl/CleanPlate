@@ -120,7 +120,6 @@ def search():
         return jsonify([])
 
     # --- THIS IS THE CORRECTED PARAMETER ASSEMBLY LOGIC ---
-    # 1. Build parameters for each part of the query separately
     where_params = [f"%{normalized_search}%", normalized_search]
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
 
@@ -155,12 +154,13 @@ def search():
         """
         order_by_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
+    # **THE FIX IS HERE: Defining `offset` before it is used.**
+    offset = (page - 1) * per_page
     pagination_params = [per_page, offset]
 
-    # 2. Combine all parameters into a single list in the correct order
+    # Combine all parameters into a single list in the correct order
     final_params = tuple(where_params + order_by_params + pagination_params)
-
-    # 3. Construct the query
+    
     full_query = f"""
         WITH sorted_camis AS (
             SELECT camis
@@ -179,7 +179,6 @@ def search():
             LIMIT %s OFFSET %s
         ) as paginated_camis ON r.camis = paginated_camis.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        -- The final ordering is now handled by the Python logic to preserve groups
         ORDER BY r.camis, r.inspection_date DESC;
     """
 
@@ -220,9 +219,8 @@ def search():
     for res in final_results:
         res['inspections'] = sorted(list(res['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
     
-    # Final re-sorting logic (removed from previous version as it was buggy)
-    # The database query now handles the primary sorting of restaurants.
-    # The grouping logic in Python might slightly affect order, which is a known limitation.
+    # The database query now handles the primary sorting.
+    # The final re-sorting logic in python has been removed to avoid bugs.
         
     return jsonify(final_results)
     
