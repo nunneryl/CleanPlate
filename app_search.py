@@ -119,31 +119,30 @@ def search():
     if not normalized_search:
         return jsonify([])
 
-    # --- THIS IS THE CORRECTED PARAMETER ASSEMBLY LOGIC ---
+    # Build the WHERE clause for filtering
     where_params = [f"%{normalized_search}%", normalized_search]
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
-
     if grade_filter and grade_filter.upper() in ['A', 'B', 'C', 'P', 'Z', 'N']:
         where_conditions.append("grade = %s")
         where_params.append(grade_filter.upper())
     if boro_filter:
         where_conditions.append("boro ILIKE %s")
         where_params.append(boro_filter)
-    
     where_clause = " AND ".join(where_conditions)
 
-    order_by_clause = ""
-    order_by_params = []
+    # Build the ORDER BY clause for the final, sorted result set
+    final_order_by_clause = ""
+    relevance_params = []
     if sort_option == 'name_asc':
-        order_by_clause = "ORDER BY dba ASC"
+        final_order_by_clause = "ORDER BY dba ASC"
     elif sort_option == 'name_desc':
-        order_by_clause = "ORDER BY dba DESC"
+        final_order_by_clause = "ORDER BY dba DESC"
     elif sort_option == 'date_desc':
-        order_by_clause = "ORDER BY inspection_date DESC"
+        final_order_by_clause = "ORDER BY inspection_date DESC"
     elif sort_option == 'grade_asc':
-        order_by_clause = "ORDER BY CASE WHEN grade = 'A' THEN 1 WHEN grade = 'B' THEN 2 WHEN grade = 'C' THEN 3 ELSE 4 END, dba ASC"
+        final_order_by_clause = "ORDER BY CASE WHEN grade = 'A' THEN 1 WHEN grade = 'B' THEN 2 WHEN grade = 'C' THEN 3 ELSE 4 END, dba ASC"
     else: # Default relevance sort
-        order_by_clause = """
+        final_order_by_clause = """
         ORDER BY
             CASE WHEN dba_normalized_search = %s THEN 0
                  WHEN dba_normalized_search ILIKE %s THEN 1
@@ -152,77 +151,84 @@ def search():
             similarity(dba_normalized_search, %s) DESC,
             length(dba_normalized_search)
         """
-        order_by_params = [normalized_search, f"{normalized_search}%", normalized_search]
-
-    # **THE FIX IS HERE: Defining `offset` before it is used.**
-    offset = (page - 1) * per_page
-    pagination_params = [per_page, offset]
-
-    # Combine all parameters into a single list in the correct order
-    final_params = tuple(where_params + order_by_params + pagination_params)
+        relevance_params = [normalized_search, f"{normalized_search}%", normalized_search]
+    
+    # This query uses DISTINCT ON to get the latest record, then applies filters,
+    # and finally wraps it all in an outer query to apply the final sort order.
+    base_query = f"""
+        SELECT DISTINCT ON (camis) *
+        FROM restaurants
+        ORDER BY camis, inspection_date DESC, record_date DESC
+    """
     
     full_query = f"""
-        WITH sorted_camis AS (
-            SELECT camis
-            FROM (
-                SELECT DISTINCT ON (camis) *
-                FROM restaurants
-                ORDER BY camis, inspection_date DESC
-            ) as latest_restaurants
-            WHERE {where_clause}
-            {order_by_clause}
-        )
-        SELECT r.*, v.violation_code, v.violation_description
-        FROM restaurants r
-        JOIN (
-            SELECT camis FROM sorted_camis
-            LIMIT %s OFFSET %s
-        ) as paginated_camis ON r.camis = paginated_camis.camis
-        LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        ORDER BY r.camis, r.inspection_date DESC;
+        WITH latest_restaurants AS ({base_query})
+        SELECT *
+        FROM latest_restaurants
+        WHERE {where_clause}
+        {final_order_by_clause}
     """
+
+    # Combine all parameters in the correct order for the full query
+    final_params = tuple(where_params + relevance_params)
 
     try:
         from db_manager import DatabaseConnection
         with DatabaseConnection() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            # We fetch all matching camis first based on the query
             cursor.execute(full_query, final_params)
-            results = cursor.fetchall()
-            logger.info(f"Database returned {len(results)} rows for term '{search_term}'.")
+            # Apply pagination to the sorted list of unique restaurants
+            all_matching_restaurants = cursor.fetchall()
+            offset = (page - 1) * per_page
+            paginated_restaurants = all_matching_restaurants[offset:offset + per_page]
+            
+            if not paginated_restaurants:
+                return jsonify([])
+
+            # Get all inspections for only the restaurants on the current page
+            paginated_camis = [r['camis'] for r in paginated_restaurants]
+            
+            # Fetch all data for the paginated camis
+            details_query = """
+                SELECT r.*, v.violation_code, v.violation_description
+                FROM restaurants r
+                LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
+                WHERE r.camis = ANY(%s)
+                ORDER BY r.inspection_date DESC
+            """
+            cursor.execute(details_query, (paginated_camis,))
+            all_rows = cursor.fetchall()
 
     except Exception as e:
         logger.error(f"DB search failed for '{search_term}': {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
-    if not results: return jsonify([])
-        
-    restaurant_dict = {}
-    for row in results:
-        camis_str = str(row['camis'])
-        if camis_str not in restaurant_dict:
-            restaurant_data = {k: v for k, v in row.items() if k not in ['violation_code', 'violation_description', 'inspection_date', 'critical_flag', 'grade', 'inspection_type']}
-            restaurant_dict[camis_str] = restaurant_data
-            restaurant_dict[camis_str]['inspections'] = {}
-        
-        insp_date_str = row['inspection_date'].isoformat()
-        if insp_date_str not in restaurant_dict[camis_str]['inspections']:
-            restaurant_dict[camis_str]['inspections'][insp_date_str] = {
-                'inspection_date': insp_date_str, 'grade': row['grade'], 'critical_flag': row['critical_flag'],
-                'inspection_type': row['inspection_type'], 'violations': []
-            }
-        
-        if row['violation_code']:
-            v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
-            if v_data not in restaurant_dict[camis_str]['inspections'][insp_date_str]['violations']:
-                restaurant_dict[camis_str]['inspections'][insp_date_str]['violations'].append(v_data)
+    # Process results into final JSON structure
+    restaurant_dict = {str(r['camis']): r for r in paginated_restaurants}
+    for res_camis in restaurant_dict:
+        restaurant_dict[res_camis] = dict(restaurant_dict[res_camis])
+        restaurant_dict[res_camis]['inspections'] = []
 
-    final_results = list(restaurant_dict.values())
-    for res in final_results:
-        res['inspections'] = sorted(list(res['inspections'].values()), key=lambda x: x['inspection_date'], reverse=True)
-    
-    # The database query now handles the primary sorting.
-    # The final re-sorting logic in python has been removed to avoid bugs.
-        
-    return jsonify(final_results)
+    for row in all_rows:
+        camis_str = str(row['camis'])
+        if camis_str in restaurant_dict:
+             # Check if this inspection is already added
+            existing_dates = {insp['inspection_date'] for insp in restaurant_dict[camis_str]['inspections']}
+            insp_date_str = row['inspection_date'].isoformat()
+            if insp_date_str not in existing_dates:
+                 restaurant_dict[camis_str]['inspections'].append({
+                    'inspection_date': insp_date_str, 'grade': row['grade'],
+                    'critical_flag': row['critical_flag'], 'inspection_type': row['inspection_type'], 'violations': []
+                })
+            # Add violations to the correct inspection
+            for insp in restaurant_dict[camis_str]['inspections']:
+                if insp['inspection_date'] == insp_date_str and row['violation_code']:
+                    v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
+                    if v_data not in insp['violations']:
+                        insp['violations'].append(v_data)
+                        break
+
+    return jsonify(list(restaurant_dict.values()))
     
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
