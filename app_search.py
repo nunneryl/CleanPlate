@@ -99,6 +99,7 @@ def teardown_db(exception):
 
 @app.route('/search', methods=['GET'])
 def search():
+    # ... (search function remains unchanged)
     search_term = request.args.get('name', '').strip()
     grade_filter = request.args.get('grade', type=str)
     boro_filter = request.args.get('boro', type=str)
@@ -116,7 +117,7 @@ def search():
     term_for_synonym_check = re.sub(r"\s+", "", normalized_search)
     if term_for_synonym_check in SEARCH_TERM_SYNONYMS:
         normalized_search = SEARCH_TERM_SYNONYMS.get(term_for_synonym_check, normalized_search)
-    
+
     if not normalized_search:
         return jsonify([])
 
@@ -222,7 +223,30 @@ def search():
                         break
 
     return jsonify(list(restaurant_dict.values()))
-    
+
+# --- NEW ENDPOINT TO GET CUISINE TYPES ---
+@app.route('/cuisines', methods=['GET'])
+def get_cuisines():
+    """Fetches a sorted list of unique cuisine descriptions from the database."""
+    query = """
+        SELECT DISTINCT cuisine_description 
+        FROM restaurants 
+        WHERE cuisine_description IS NOT NULL AND cuisine_description <> ''
+        ORDER BY cuisine_description ASC;
+    """
+    try:
+        from db_manager import DatabaseConnection
+        with DatabaseConnection() as conn, conn.cursor() as cursor:
+            cursor.execute(query)
+            # The result will be a list of tuples, e.g., [('American',), ('Italian',)]
+            # We need to flatten it into a simple list of strings.
+            cuisines = [row[0] for row in cursor.fetchall()]
+            return jsonify(cuisines)
+    except Exception as e:
+        logger.error(f"Failed to fetch cuisine list: {e}", exc_info=True)
+        return jsonify({"error": "Could not retrieve cuisine list"}), 500
+
+# Other endpoints...
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
     return jsonify([])
