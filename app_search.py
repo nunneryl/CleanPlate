@@ -226,28 +226,6 @@ def search():
 
     return jsonify(list(restaurant_dict.values()))
 
-@app.route('/cuisines', methods=['GET'])
-def get_cuisines():
-    """Fetches a sorted list of unique cuisine descriptions from the database."""
-    query = """
-        SELECT DISTINCT cuisine_description 
-        FROM restaurants 
-        WHERE cuisine_description IS NOT NULL AND cuisine_description <> ''
-        ORDER BY cuisine_description ASC;
-    """
-    try:
-        # Use the same connection management as the search endpoint
-        if DatabaseConnection is None:
-            from db_manager import DatabaseConnection
-
-        with DatabaseConnection() as conn, conn.cursor() as cursor:
-            cursor.execute(query)
-            cuisines = [row[0] for row in cursor.fetchall()]
-            return jsonify(cuisines)
-    except Exception as e:
-        logger.error(f"Failed to fetch cuisine list: {e}", exc_info=True)
-        return jsonify({"error": "Could not retrieve cuisine list"}), 500
-
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
     return jsonify([])
