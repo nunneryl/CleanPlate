@@ -1,176 +1,117 @@
+# correct_normalization_backfill.py
 import psycopg2
-import psycopg2.extras # For DictCursor
+import psycopg2.extras
 import re
 import os
 import logging
-from datetime import datetime # For logging timestamp
+from datetime import datetime
 
 # --- Logging Setup ---
 logging.basicConfig(
-    level=logging.DEBUG, # Changed to DEBUG to get more verbose output
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("backfill_fts_locally_v2_debug.log"), # Log to a new file
-        logging.StreamHandler() # Also log to console
+        logging.FileHandler("correct_normalization_backfill.log"),
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-# --- AGGRESSIVE NORMALIZATION FUNCTION (Must match update_database.py and app_search.py) ---
-def normalize_text(text):
+# --- CANONICAL NORMALIZATION FUNCTION (Copied from app_search.py) ---
+def normalize_text_final(text):
     if not isinstance(text, str):
         return ''
-    text = text.lower()
-    # Convert apostrophes and periods to spaces first.
-    # This helps separate terms like "E.J.'s" into "e j s" before further processing.
-    # For "Xi'an", it becomes "xi an". For "Joe's", it becomes "joe s".
-    text = text.replace("'", " ").replace(".", " ")
-    text = text.replace('&', ' and ') # Replace ampersand with ' and '
-    
-    # Remove any characters that are not alphanumeric or whitespace
-    text = re.sub(r'[^\w\s]', '', text)
-    
-    # Collapse multiple spaces into a single space and strip leading/trailing whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
-# --- END AGGRESSIVE NORMALIZATION FUNCTION ---
+    normalized_text = text.lower()
+    normalized_text = normalized_text.replace('&', ' and ')
+    accent_map = {
+        'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a',
+        'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o',
+        'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ç': 'c', 'ñ': 'n'
+    }
+    for accented, unaccented in accent_map.items():
+        normalized_text = normalized_text.replace(accented, unaccented)
+    normalized_text = re.sub(r"['./-]", " ", normalized_text)
+    normalized_text = re.sub(r"[^a-z0-9\s]", "", normalized_text)
+    normalized_text = re.sub(r"\s+", " ", normalized_text).strip()
+    return normalized_text
 
 def get_db_connection_string():
-    conn_str = os.environ.get('DATABASE_URL_FOR_BACKFILL')
+    conn_str = os.environ.get('DATABASE_URL') # Assumes Railway's standard DATABASE_URL
     if not conn_str:
-        logger.warning("DATABASE_URL_FOR_BACKFILL environment variable not set.")
-        conn_str = input("Please paste your full PostgreSQL connection URL from Railway: ")
+        logger.error("DATABASE_URL environment variable not set.")
+        conn_str = input("Please paste your full PostgreSQL connection URL: ")
     return conn_str
 
-def backfill_dba_tsv(batch_size=500): # Process in batches
+def run_corrective_backfill(batch_size=500):
     conn_string = get_db_connection_string()
     if not conn_string:
         logger.error("No database connection string provided. Exiting.")
         return
 
-    conn = None
     updated_count = 0
     processed_count = 0
-    failed_to_normalize_count = 0
-    skipped_due_to_empty_normalized_dba = 0
-
+    
     try:
-        logger.info(f"Connecting to database...")
+        logger.info("Connecting to the database...")
         conn = psycopg2.connect(conn_string)
-        logger.info("Successfully connected to the database.")
         
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor_count:
-            cursor_count.execute("SELECT COUNT(*) FROM restaurants WHERE dba IS NOT NULL;")
+        with conn.cursor() as cursor_count:
+            cursor_count.execute("SELECT COUNT(*) FROM restaurants;")
             total_rows = cursor_count.fetchone()[0]
-            logger.info(f"Total restaurants with a DBA to potentially process: {total_rows}")
-            if total_rows == 0:
-                logger.info("No restaurants to backfill. Exiting.")
-                return
+            logger.info(f"Total restaurant records to process: {total_rows}")
 
         offset = 0
-        while True:
-            logger.info(f"Fetching batch of restaurants (offset: {offset}, limit: {batch_size})...")
+        while processed_count < total_rows:
+            logger.info(f"Fetching batch of records (offset: {offset}, limit: {batch_size})...")
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor_select:
                 cursor_select.execute(
-                    "SELECT camis, dba, inspection_date FROM restaurants WHERE dba IS NOT NULL ORDER BY camis, inspection_date LIMIT %s OFFSET %s;",
+                    "SELECT camis, inspection_date, dba FROM restaurants ORDER BY camis, inspection_date LIMIT %s OFFSET %s;",
                     (batch_size, offset)
                 )
                 rows = cursor_select.fetchall()
 
             if not rows:
-                logger.info("No more rows to process in database.")
                 break
 
-            logger.info(f"Fetched {len(rows)} rows for this batch.")
             updates_to_execute = []
-            for row_num, row in enumerate(rows):
-                processed_count += 1
-                try:
-                    camis = row['camis']
-                    dba = row['dba'] # This should not be None due to WHERE clause
-                    inspection_date = row['inspection_date']
-
-                    if not isinstance(dba, str):
-                        logger.warning(f"Row {processed_count} (CAMIS {camis}, InspDate {inspection_date}): DBA is not a string (type: {type(dba)}). Skipping.")
-                        failed_to_normalize_count +=1
-                        continue
-
-                    normalized_dba = normalize_text(dba) # normalize_text now logs its input/output
-                    
-                    if not normalized_dba:
-                        logger.warning(f"Row {processed_count} (CAMIS {camis}, InspDate {inspection_date}): Normalized DBA is empty for original DBA: '{dba[:100]}'. Skipping.")
-                        skipped_due_to_empty_normalized_dba += 1
-                        continue
-                    
-                    updates_to_execute.append((normalized_dba, camis, inspection_date))
-                    if row_num < 5: # Log first 5 prepared updates in this batch
-                        logger.debug(f"Prepared for update: CAMIS={camis}, InspDate={inspection_date}, NormDBA='{normalized_dba}'")
-
-                except Exception as e:
-                    logger.error(f"Error processing row {processed_count} (CAMIS {row.get('camis')}, DBA {row.get('dba')[:100]}): {e}", exc_info=True)
-                    failed_to_normalize_count +=1 # Count as a failure to normalize/prepare
+            for row in rows:
+                if not row['dba']:
                     continue
-            
-            logger.info(f"Prepared {len(updates_to_execute)} updates for this batch.")
+                
+                normalized_dba = normalize_text_final(row['dba'])
+                updates_to_execute.append((normalized_dba, row['camis'], row['inspection_date']))
 
             if updates_to_execute:
-                batch_update_successful_rows = 0
-                try:
-                    with conn.cursor() as cursor_update: # New cursor for update
-                        psycopg2.extras.execute_batch(
-                            cursor_update,
-                            """
-                            UPDATE restaurants 
-                            SET dba_tsv = to_tsvector('english', %s) 
-                            WHERE camis = %s AND inspection_date = %s;
-                            """,
-                            updates_to_execute,
-                            page_size=100
-                        )
-                        # rowcount for execute_batch with psycopg2 might not be reliable for actual updated rows.
-                        # It often returns the number of statements in the last batch executed.
-                        # We assume if no exception, all in updates_to_execute were attempted.
-                        batch_update_successful_rows = len(updates_to_execute)
-                        conn.commit() # Commit after each successful batch
-                        updated_count += batch_update_successful_rows
-                        logger.info(f"Committed batch. {batch_update_successful_rows} update statements executed. Total updated so far: {updated_count}")
-                except Exception as e:
-                    conn.rollback()
-                    logger.error(f"Error executing update batch. Rolled back. Error: {e}", exc_info=True)
-                    # All in this batch are now considered failed for counting purposes
-                    failed_to_normalize_count += len(updates_to_execute)
-            else:
-                logger.info("No updates to execute for this batch (all DBAs might have normalized to empty or had issues).")
+                with conn.cursor() as cursor_update:
+                    update_query = """
+                        UPDATE restaurants
+                        SET 
+                            dba_normalized_search = %s,
+                            dba_tsv = to_tsvector('public.restaurant_search_config', %s)
+                        WHERE camis = %s AND inspection_date = %s
+                    """
+                    # We need to pass the normalized_dba twice for the two %s placeholders
+                    update_params = [(norm_dba, norm_dba, camis, insp_date) for norm_dba, camis, insp_date in updates_to_execute]
+                    psycopg2.extras.execute_batch(cursor_update, update_query, update_params)
+                    updated_count += cursor_update.rowcount
+
+            processed_count += len(rows)
+            offset += batch_size
+            conn.commit()
+            logger.info(f"Batch committed. Processed: {processed_count}/{total_rows}. Updated so far: {updated_count}")
             
-            if len(rows) < batch_size: # Last page
-                logger.info("Processed the last page of rows from database.")
-                break
-            offset += batch_size # Move to next page
+        logger.info("Corrective backfill process completed.")
 
-        logger.info("Backfill process completed iteration through database rows.")
-
-    except psycopg2.Error as db_err:
-        logger.error(f"Database connection error or query error: {db_err}", exc_info=True)
     except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+        logger.error(f"An error occurred: {e}", exc_info=True)
     finally:
-        if conn:
+        if 'conn' in locals() and conn:
             conn.close()
             logger.info("Database connection closed.")
-    
-    logger.info(f"--- Backfill Summary ---")
-    logger.info(f"Total records iterated through (approx): {processed_count}")
-    logger.info(f"Successfully executed UPDATE statements for: {updated_count} records")
-    logger.info(f"Skipped due to empty normalized DBA: {skipped_due_to_empty_normalized_dba} records")
-    logger.info(f"Failed during processing/preparation (before update attempt) or during update batch: {failed_to_normalize_count} records")
 
 if __name__ == "__main__":
-    logger.info("Starting local FTS backfill script (v2 with enhanced debugging)...")
     start_time = datetime.now()
-    
-    # Ensure DATABASE_URL_FOR_BACKFILL is set or script will prompt
-    backfill_dba_tsv(batch_size=100) # Smaller batch size for initial debug run
-    
+    logger.info("Starting the corrective backfill to fix normalization in the database...")
+    run_corrective_backfill()
     end_time = datetime.now()
     logger.info(f"Script finished in {end_time - start_time}.")
-
