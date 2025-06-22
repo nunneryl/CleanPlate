@@ -25,7 +25,59 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-SEARCH_TERM_SYNONYMS = { 'pjclarkes': 'p j clarkes', 'mcdonalds': 'mcdonalds', } # Truncated for display
+SEARCH_TERM_SYNONYMS = {
+    'allar': 'all ar', 'allantico': 'all antico', 'amore': 'a more', 'annam': 'an nam',
+    'annestccd': 'anne stccd', 'apizza': 'a pizza', 'apou': 'a pou', 'arcteryx': 'arc teryx',
+    'baal': 'ba al', 'baires': 'b aires', 'baluk': 'baluk', 'barb': 'bar b',
+    'bartusi': 'b artusi', 'bklyn': 'b klyn', 'bobsang': 'bob sang', 'bouote': 'bou ote',
+    'boxralph': 'box ralph', 'cafeflor': 'cafe flor', 'cafelounge': 'cafe lounge', 'capt': 'cap t',
+    'centanni': 'cent anni', 'centerseoul': 'center seoul', 'chickn': 'chick n', 'chilld': 'chill d',
+    'chopt': 'chop t', 'cmon': 'c mon', 'cocacola': 'coca cola', 'cookup': 'cook up',
+    'dalsace': 'd alsace', 'damico': 'd amico', 'damigos': 'd amigos', 'damilio': 'da milio',
+    'damore': 'd amore', 'damour': 'd amour', 'dangelo': 'd angelo', 'danna': 'd anna',
+    'dantan': 'd antan', 'dantigua': 'd antigua', 'danvers': 'd anvers', 'darturo': 'd arturo',
+    'davignon': 'd avignon', 'dbichote': 'd bichote', 'dblass': 'd blass', 'delisa': 'd elisa',
+    'dellanima': 'dell anima', 'dellaria': 'dell aria', 'dellarte': 'dell arte', 'dhote': 'd hote',
+    'dippindots': 'dippin dots', 'dlenny': 'd lenny', 'dlili': 'd lili', 'dlioz': 'd lioz',
+    'dmaritza': 'd maritza', 'dmelting': 'd melting', 'dmorena': 'd morena', 'dont': 'don t',
+    'dor': 'd or', 'doro': 'doro', 'dpikete': 'd pikete', 'eatme': 'eat me',
+    'eatrite': 'eat rite', 'eightyseven': 'eighty seven', 'esca': 'es ca', 'geez': 'gee z',
+    'guisao': 'guisa o', 'hobrah': 'ho brah', 'hookd': 'hook d', 'hookt': 'hook t',
+    'hotelsunken': 'hotel sunken', 'im': 'i m', 'imilky': 'i milky', 'intl': 'int l',
+    'jamit': 'jam it', 'jeangeorges': 'jean georges', 'kapet': 'kape t', 'kchicken': 'k chicken',
+    'kfeteria': 'k feteria', 'kfood': 'k food', 'kind': 'kin d', 'ktown': 'k town',
+    'labeille': 'l abeille', 'laccolade': 'l accolade', 'ladresse': 'l adresse', 'lalbero': 'l albero',
+    'lalgeroise': 'l algeroise', 'lamericana': 'l americana', 'lami': 'l ami', 'lamico': 'l amico',
+    'lamore': 'l amore', 'lamour': 'l amour', 'langeletto': 'l angeletto', 'langolo': 'l angolo',
+    'lantica': 'l antica', 'lappartement': 'l appartement', 'largot': 'l argot', 'laroma': 'l aroma',
+    'larte': 'l arte', 'lartusi': 'l artusi', 'lavenue': 'l avenue', 'lavion': 'l avion',
+    'lentrecote': 'l entrecote', 'lexpress': 'l express', 'lifechanging': 'life changing',
+    'limprimerie': 'l imprimerie', 'lindustrie': 'l industrie', 'litaliano': 'l italiano', 'loreal': 'l oreal',
+    'lores': 'lo res', 'losteria': 'l osteria', 'lunique': 'l unique', 'lwren': 'l wren',
+    'mahalmannan': 'mahal mannan', 'mugz': 'mug z', 'munchn': 'munch n', 'nmore': 'n more',
+    'nroll': 'n roll', 'nshpi': 'n shpi', 'ocasey': 'o casey', 'occaffe': 'o ccaffe',
+    'oconnor': 'o connor', 'odonoghue': 'o donoghue', 'ogrady': 'o grady', 'ohanlon': 'o hanlon',
+    'ohara': 'o hara', 'oharas': 'o haras', 'oldays': 'ol days', 'oneals': 'o neals',
+    'oneill': 'o neill', 'onieals': 'o nieals', 'onsite': 'on site', 'osake': 'o sake',
+    'osfizio': 'o sfizio', 'osun': 'o sun', 'osur': 'osu r', 'ote': 'o te',
+    'otoole': 'o toole', 'otooles': 'o tooles', 'pal': 'pa l', 'palacetrouble': 'palace trouble',
+    'picka': 'pick a', 'piecea': 'piece a', 'qrico': 'q rico', 'regz': 'reg z',
+    'ritzcarlton': 'ritz carlton', 'said': 'sa id', 'saimer': 's aimer', 'satacos': 'sa tacos',
+    'sekend': 'sek end', 'shaken': 'shake n', 'smashd': 'smash d', 'smores': 's mores',
+    'songe': 'song e', 'stackd': 'stack d', 'steamr': 'steam r', 'ststage': 'st stage',
+    'stuffd': 'stuff d', 'sugard': 'sugar d', 'taeem': 'ta eem', 'taime': 't aime',
+    'takeout': 'take out', 'taverndanny': 'tavern danny', 'tearoom': 'tea room', 'treadz': 'tread z',
+    'twigm': 'twig m', 'walkin': 'walk in', 'winemakher': 'winemak her', 'woodfired': 'wood fired',
+    'zaatar': 'za atar', 'zgrill': 'z grill', 'pjclarkes': 'p j clarkes',
+    'mcdonalds': 'mcdonalds', 'papajohns': 'papa johns', 'burgerking': 'burger king', 'kfc': 'kfc',
+    'popeyes': 'popeyes', 'starbucks': 'starbucks', 'dunkin': 'dunkin', 'chipotle': 'chipotle',
+    'subway': 'subway', 'tacobell': 'taco bell', 'pizzahut': 'pizza hut', 'wendys': 'wendy s',
+    'fiveguys': 'five guys', 'chickfila': 'chick fil a', 'panera': 'panera bread', 'cinnabon': 'cinnabon',
+    'baskinrobbins': 'baskin robbins', 'haagendazs': 'haagen dazs', 'benandjerrys': 'ben & jerrys',
+    'auntieannes': 'auntie anne s', 'pretzeltime': 'pretzel time', 'nathansfamous': 'nathan s famous',
+    'sbarro': 'sbarro', 'halalguys': 'the halal guys', 'shakeshack': 'shake shack', 'wholefoods': 'whole foods market', 'traderjoes': 'trader joes'
+}
+
 
 @app.teardown_appcontext
 def teardown_db(exception):
@@ -48,21 +100,26 @@ def search():
 
     normalized_search = normalize_search_term_for_hybrid(search_term)
     
-    where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
-    params = [f"%{normalized_search}%", normalized_search]
+    # 1. Build WHERE clause and parameters
+    # The name filter is separate as it's applied first for performance
+    name_filter_clause = "(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"
+    name_params = [f"%{normalized_search}%", normalized_search]
 
+    other_filter_conditions = []
+    other_filter_params = []
     if grade_filter:
-        where_conditions.append("grade = %s")
-        params.append(grade_filter.upper())
+        other_filter_conditions.append("grade = %s")
+        other_filter_params.append(grade_filter.upper())
     if boro_filter:
-        where_conditions.append("boro ILIKE %s")
-        params.append(boro_filter)
+        other_filter_conditions.append("boro ILIKE %s")
+        other_filter_params.append(boro_filter)
     if cuisine_filter:
-        where_conditions.append("cuisine_description ILIKE %s")
-        params.append(f"%{cuisine_filter}%")
+        other_filter_conditions.append("cuisine_description ILIKE %s")
+        other_filter_params.append(f"%{cuisine_filter}%")
     
-    where_clause = " AND ".join(where_conditions)
+    other_filters_clause = (" AND ".join(other_filter_conditions)) if other_filter_conditions else "TRUE"
 
+    # 2. Build ORDER BY clause
     order_by_clause = ""
     order_by_params = []
     if sort_option == 'name_asc':
@@ -85,19 +142,22 @@ def search():
         """
         order_by_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
+    # 3. High-Performance Query to get just the paginated IDs
     id_fetch_query = f"""
-        SELECT camis FROM (
-            SELECT DISTINCT ON (camis) camis, dba, dba_normalized_search, grade, inspection_date, cuisine_description, boro
-            FROM restaurants
-            ORDER BY camis, inspection_date DESC
-        ) AS latest_restaurants
-        WHERE {where_clause}
+        WITH matching_restaurants AS (
+            SELECT * FROM restaurants WHERE {name_filter_clause}
+        ),
+        latest_matching AS (
+            SELECT DISTINCT ON (camis) * FROM matching_restaurants ORDER BY camis, inspection_date DESC
+        )
+        SELECT camis FROM latest_matching
+        WHERE {other_filters_clause}
         {order_by_clause}
         LIMIT %s OFFSET %s;
     """
     
     offset = (page - 1) * per_page
-    id_fetch_params = tuple(params + order_by_params + [per_page, offset])
+    id_fetch_params = tuple(name_params + other_filter_params + order_by_params + [per_page, offset])
 
     try:
         with DatabaseConnection() as conn, conn.cursor() as cursor:
@@ -115,7 +175,6 @@ def search():
                 LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
                 WHERE r.camis = ANY(%s)
             """
-            # ** THE FIX IS HERE: Use DictCursor for the details query **
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as details_cursor:
                 details_cursor.execute(details_query, (paginated_camis,))
                 all_rows = details_cursor.fetchall()
@@ -124,6 +183,7 @@ def search():
         logger.error(f"DB search failed for '{search_term}': {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
+    # 4. Process results, preserving the correct sort order
     restaurant_details_map = {str(camis): [] for camis in paginated_camis}
     for row in all_rows:
         restaurant_details_map[str(row['camis'])].append(row)
@@ -131,9 +191,11 @@ def search():
     final_results = []
     for camis in paginated_camis:
         camis_str = str(camis)
-        rows_for_restaurant = restaurant_details_map[camis_str]
+        rows_for_restaurant = restaurant_details_map.get(camis_str)
+        if not rows_for_restaurant:
+            continue
+
         base_info = dict(rows_for_restaurant[0])
-        
         inspections = {}
         for row in rows_for_restaurant:
             insp_date_str = row['inspection_date'].isoformat()
@@ -155,10 +217,6 @@ def search():
         final_results.append(base_info)
         
     return jsonify(final_results)
-
-# Other endpoints remain the same
-# ...
-
 
 @app.route('/recent', methods=['GET'])
 def recent_restaurants():
