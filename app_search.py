@@ -9,11 +9,17 @@ from flask_cors import CORS
 import psycopg2
 import psycopg2.extras
 
-# Import from our new utility file and other modules
+# Import from our utility file and other modules
 from utils import normalize_search_term_for_hybrid
 from db_manager import DatabaseConnection
 from config import APIConfig
-from update_database import run_database_update
+
+try:
+    # This import is now safe because of the utils.py refactor
+    from update_database import run_database_update
+    update_logic_imported = True
+except ImportError:
+    update_logic_imported = False
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 logger = logging.getLogger(__name__)
@@ -74,8 +80,6 @@ SEARCH_TERM_SYNONYMS = {
     'sbarro': 'sbarro', 'halalguys': 'the halal guys', 'shakeshack': 'shake shack', 'wholefoods': 'whole foods market', 'traderjoes': 'trader joes'
 }
 
-# The normalization function has been removed from this file and is now imported from utils.py
-
 @app.teardown_appcontext
 def teardown_db(exception):
     db_conn = g.pop('db_conn', None)
@@ -84,8 +88,6 @@ def teardown_db(exception):
 
 @app.route('/search', methods=['GET'])
 def search():
-    # This function uses the imported normalize_search_term_for_hybrid
-    # The rest of the logic is the final, high-performance version
     search_term = request.args.get('name', '').strip()
     grade_filter = request.args.get('grade', type=str)
     boro_filter = request.args.get('boro', type=str)
@@ -99,21 +101,25 @@ def search():
 
     normalized_search = normalize_search_term_for_hybrid(search_term)
     
-    where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
-    params = [f"%{normalized_search}%", normalized_search]
+    # Build WHERE clause and parameters
+    name_filter_clause = "(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"
+    name_params = [f"%{normalized_search}%", normalized_search]
 
+    other_filter_conditions = []
+    other_filter_params = []
     if grade_filter:
-        where_conditions.append("grade = %s")
-        params.append(grade_filter.upper())
+        other_filter_conditions.append("grade = %s")
+        other_filter_params.append(grade_filter.upper())
     if boro_filter:
-        where_conditions.append("boro ILIKE %s")
-        params.append(boro_filter)
+        other_filter_conditions.append("boro ILIKE %s")
+        other_filter_params.append(boro_filter)
     if cuisine_filter:
-        where_conditions.append("cuisine_description ILIKE %s")
-        params.append(f"%{cuisine_filter}%")
+        other_filter_conditions.append("cuisine_description ILIKE %s")
+        other_filter_params.append(f"%{cuisine_filter}%")
     
-    where_clause = " AND ".join(where_conditions)
+    other_filters_clause = (" AND ".join(other_filter_conditions)) if other_filter_conditions else "TRUE"
 
+    # Build ORDER BY clause
     order_by_clause = ""
     order_by_params = []
     if sort_option == 'name_asc':
@@ -136,19 +142,22 @@ def search():
         """
         order_by_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
+    # High-Performance Query to get just the paginated IDs
     id_fetch_query = f"""
-        SELECT camis FROM (
-            SELECT DISTINCT ON (camis) camis, dba, dba_normalized_search, grade, inspection_date, cuisine_description, boro
-            FROM restaurants
-            ORDER BY camis, inspection_date DESC
-        ) AS latest_restaurants
-        WHERE {where_clause}
+        WITH matching_restaurants AS (
+            SELECT * FROM restaurants WHERE {name_filter_clause}
+        ),
+        latest_matching AS (
+            SELECT DISTINCT ON (camis) * FROM matching_restaurants ORDER BY camis, inspection_date DESC
+        )
+        SELECT camis FROM latest_matching
+        WHERE {other_filters_clause}
         {order_by_clause}
         LIMIT %s OFFSET %s;
     """
     
     offset = (page - 1) * per_page
-    id_fetch_params = tuple(params + order_by_params + [per_page, offset])
+    id_fetch_params = tuple(name_params + other_filter_params + order_by_params + [per_page, offset])
 
     try:
         with DatabaseConnection() as conn, conn.cursor() as cursor:
@@ -174,6 +183,7 @@ def search():
         logger.error(f"DB search failed for '{search_term}': {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
+    # Process results, preserving the correct sort order
     restaurant_details_map = {str(camis): [] for camis in paginated_camis}
     for row in all_rows:
         restaurant_details_map[str(row['camis'])].append(row)

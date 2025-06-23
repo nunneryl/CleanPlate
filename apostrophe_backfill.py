@@ -1,26 +1,42 @@
-# correct_normalization_backfill.py
+# apostrophe_backfill.py
+#
+# ONE-TIME SCRIPT to fix apostrophe handling in the database.
+#
+# What it does:
+# 1. Fetches all unique restaurant names from your live database.
+# 2. Re-calculates the normalized search term for each name using the NEW logic
+#    (removing apostrophes, e.g., "Joe's" becomes "joes").
+# 3. Updates the `dba_normalized_search` column in your database with the corrected terms.
+# 4. Clears your Redis cache to ensure users see the new, correct search results immediately.
+#
+# HOW TO RUN:
+# 1. Make sure your local environment is connected to your live Railway database
+#    (i.e., your .env file has the production database credentials).
+# 2. Run this script from your terminal: `python apostrophe_backfill.py`
+
+import os
+import re
+import logging
 import psycopg2
 import psycopg2.extras
-import re
-import os
-import logging
-from datetime import datetime
+import redis
+
+# Local application imports
+try:
+    from db_manager import DatabaseConnection, get_redis_client
+    from config import RedisConfig
+except ImportError as e:
+    print(f"CRITICAL ERROR: Could not import necessary modules. Make sure this script is in the same directory as your other backend files. Error: {e}")
+    exit(1)
 
 # --- Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("correct_normalization_backfill.log"),
-        logging.StreamHandler()
-    ]
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', force=True)
 logger = logging.getLogger(__name__)
 
-# --- CANONICAL NORMALIZATION FUNCTION (Copied from app_search.py) ---
-def normalize_text_final(text):
-    if not isinstance(text, str):
-        return ''
+# --- THE CORRECTED NORMALIZATION FUNCTION ---
+# This MUST be identical to the new function in your deployed `app_search.py`
+def normalize_search_term_for_hybrid(text):
+    if not isinstance(text, str): return ''
     normalized_text = text.lower()
     normalized_text = normalized_text.replace('&', ' and ')
     accent_map = {
@@ -30,88 +46,98 @@ def normalize_text_final(text):
     }
     for accented, unaccented in accent_map.items():
         normalized_text = normalized_text.replace(accented, unaccented)
-    normalized_text = re.sub(r"['./-]", " ", normalized_text)
+    
+    # This is the critical change: remove apostrophes entirely.
+    normalized_text = re.sub(r"[']", "", normalized_text)
+    # Now, replace other specific punctuation with a space.
+    normalized_text = re.sub(r"[./-]", " ", normalized_text)
+    # Clean up any other unwanted characters and extra spaces.
     normalized_text = re.sub(r"[^a-z0-9\s]", "", normalized_text)
-    normalized_text = re.sub(r"\s+", " ", normalized_text).strip()
-    return normalized_text
+    normalized_text = re.sub(r"\s+", " ", normalized_text)
+    
+    return normalized_text.strip()
 
-def get_db_connection_string():
-    conn_str = os.environ.get('DATABASE_URL') # Assumes Railway's standard DATABASE_URL
-    if not conn_str:
-        logger.error("DATABASE_URL environment variable not set.")
-        conn_str = input("Please paste your full PostgreSQL connection URL: ")
-    return conn_str
+def run_backfill():
+    """
+    Fetches, re-normalizes, and updates all restaurant search terms.
+    """
+    logger.info("--- Starting Database Backfill for Apostrophe Fix ---")
+    logger.warning("!!! IMPORTANT: It is recommended to back up your database before running this script. !!!")
 
-def run_corrective_backfill(batch_size=500):
-    conn_string = get_db_connection_string()
-    if not conn_string:
-        logger.error("No database connection string provided. Exiting.")
+    records_to_update = []
+    
+    # Step 1: Fetch all unique restaurant records (camis and dba)
+    try:
+        with DatabaseConnection() as conn, conn.cursor() as cursor:
+            logger.info("Fetching all restaurant records from the database...")
+            # We need camis and inspection_date to uniquely identify each row.
+            cursor.execute("SELECT camis, inspection_date, dba FROM restaurants;")
+            all_records = cursor.fetchall()
+            logger.info(f"Found {len(all_records)} total records to process.")
+    except Exception as e:
+        logger.critical(f"Failed to fetch records from the database. Aborting. Error: {e}", exc_info=True)
         return
 
-    updated_count = 0
-    processed_count = 0
-    
-    try:
-        logger.info("Connecting to the database...")
-        conn = psycopg2.connect(conn_string)
+    # Step 2: Process each record and re-normalize the 'dba'
+    for record in all_records:
+        camis, inspection_date, dba = record
+        if not dba:
+            continue
         
-        with conn.cursor() as cursor_count:
-            cursor_count.execute("SELECT COUNT(*) FROM restaurants;")
-            total_rows = cursor_count.fetchone()[0]
-            logger.info(f"Total restaurant records to process: {total_rows}")
+        new_normalized_dba = normalize_search_term_for_hybrid(dba)
+        # We will update the row identified by its composite primary key.
+        records_to_update.append((new_normalized_dba, camis, inspection_date))
 
-        offset = 0
-        while processed_count < total_rows:
-            logger.info(f"Fetching batch of records (offset: {offset}, limit: {batch_size})...")
-            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor_select:
-                cursor_select.execute(
-                    "SELECT camis, inspection_date, dba FROM restaurants ORDER BY camis, inspection_date LIMIT %s OFFSET %s;",
-                    (batch_size, offset)
-                )
-                rows = cursor_select.fetchall()
+    logger.info(f"Re-normalization complete. Preparing to update {len(records_to_update)} records in the database.")
 
-            if not rows:
-                break
+    # Step 3: Perform a bulk update
+    if not records_to_update:
+        logger.info("No records needed updating. Exiting.")
+        return
 
-            updates_to_execute = []
-            for row in rows:
-                if not row['dba']:
-                    continue
-                
-                normalized_dba = normalize_text_final(row['dba'])
-                updates_to_execute.append((normalized_dba, row['camis'], row['inspection_date']))
-
-            if updates_to_execute:
-                with conn.cursor() as cursor_update:
-                    update_query = """
-                        UPDATE restaurants
-                        SET 
-                            dba_normalized_search = %s,
-                            dba_tsv = to_tsvector('public.restaurant_search_config', %s)
-                        WHERE camis = %s AND inspection_date = %s
-                    """
-                    # We need to pass the normalized_dba twice for the two %s placeholders
-                    update_params = [(norm_dba, norm_dba, camis, insp_date) for norm_dba, camis, insp_date in updates_to_execute]
-                    psycopg2.extras.execute_batch(cursor_update, update_query, update_params)
-                    updated_count += cursor_update.rowcount
-
-            processed_count += len(rows)
-            offset += batch_size
-            conn.commit()
-            logger.info(f"Batch committed. Processed: {processed_count}/{total_rows}. Updated so far: {updated_count}")
+    try:
+        with DatabaseConnection() as conn, conn.cursor() as cursor:
+            logger.info("Executing bulk update... This may take a few minutes.")
             
-        logger.info("Corrective backfill process completed.")
-
+            # This SQL statement efficiently updates multiple rows at once.
+            update_query = """
+                UPDATE restaurants AS r SET
+                    dba_normalized_search = v.dba_normalized_search
+                FROM (VALUES %s) AS v(dba_normalized_search, camis, inspection_date)
+                WHERE r.camis = v.camis AND r.inspection_date = v.inspection_date;
+            """
+            
+            psycopg2.extras.execute_values(
+                cursor,
+                update_query,
+                records_to_update,
+                page_size=1000  # Process in chunks of 1000 for efficiency
+            )
+            
+            conn.commit()
+            logger.info(f"Successfully updated {cursor.rowcount} rows in the database.")
+            
     except Exception as e:
-        logger.error(f"An error occurred: {e}", exc_info=True)
-    finally:
-        if 'conn' in locals() and conn:
-            conn.close()
-            logger.info("Database connection closed.")
+        logger.critical(f"DATABASE UPDATE FAILED. The transaction was rolled back. Error: {e}", exc_info=True)
+        return
+
+    # Step 4: Clear the Redis cache
+    try:
+        logger.info("Clearing Redis cache to ensure new search results are served...")
+        redis_conn = get_redis_client()
+        if redis_conn:
+            redis_conn.flushdb()
+            logger.info("Redis cache successfully cleared.")
+        else:
+            logger.warning("Could not connect to Redis. Please clear the cache manually if possible.")
+    except Exception as e:
+        logger.error(f"An error occurred while clearing the Redis cache: {e}", exc_info=True)
+        logger.warning("You may need to manually clear the Redis cache.")
+
+    logger.info("--- Backfill script finished successfully! ---")
+
 
 if __name__ == "__main__":
-    start_time = datetime.now()
-    logger.info("Starting the corrective backfill to fix normalization in the database...")
-    run_corrective_backfill()
-    end_time = datetime.now()
-    logger.info(f"Script finished in {end_time - start_time}.")
+    # This block runs when you execute `python apostrophe_backfill.py`
+    run_backfill()
+
