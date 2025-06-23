@@ -9,15 +9,8 @@ from flask_cors import CORS
 import psycopg2
 import psycopg2.extras
 
-from utils import normalize_search_term_for_hybrid
 from db_manager import DatabaseConnection
 from config import APIConfig
-
-try:
-    from update_database import run_database_update
-    update_logic_imported = True
-except ImportError:
-    update_logic_imported = False
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 logger = logging.getLogger(__name__)
@@ -77,6 +70,18 @@ SEARCH_TERM_SYNONYMS = {
     'auntieannes': 'auntie anne s', 'pretzeltime': 'pretzel time', 'nathansfamous': 'nathan s famous',
     'sbarro': 'sbarro', 'halalguys': 'the halal guys', 'shakeshack': 'shake shack', 'wholefoods': 'whole foods market', 'traderjoes': 'trader joes'
 }
+
+def normalize_search_term_for_hybrid(text):
+    if not isinstance(text, str): return ''
+    normalized_text = text.lower().replace('&', ' and ')
+    accent_map = { 'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o', 'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ç': 'c', 'ñ': 'n' }
+    for accented, unaccented in accent_map.items():
+        normalized_text = normalized_text.replace(accented, unaccented)
+    normalized_text = re.sub(r"['.]", "", normalized_text)
+    normalized_text = re.sub(r"[-/]", " ", normalized_text)
+    normalized_text = re.sub(r"[^a-z0-9\s]", "", normalized_text)
+    normalized_text = re.sub(r"\s+", " ", normalized_text)
+    return normalized_text.strip()
 
 @app.teardown_appcontext
 def teardown_db(exception):
@@ -152,7 +157,6 @@ def search():
 
     try:
         with DatabaseConnection() as conn:
-            # Use a standard cursor for the first query to get IDs
             with conn.cursor() as cursor:
                 cursor.execute(id_fetch_query, id_fetch_params)
                 paginated_camis_tuples = cursor.fetchall()
@@ -168,7 +172,6 @@ def search():
                 LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
                 WHERE r.camis = ANY(%s)
             """
-            # ** THE FIX IS HERE: Use a separate DictCursor for the details query **
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as details_cursor:
                 details_cursor.execute(details_query, (paginated_camis,))
                 all_rows = details_cursor.fetchall()
@@ -211,12 +214,9 @@ def search():
         
     return jsonify(final_results)
 
-@app.route('/recent', methods=['GET'])
-def recent_restaurants():
-    return jsonify([])
-
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
+    # Import locally to avoid circular dependency at startup
     try:
         from update_database import run_database_update
     except ImportError:
