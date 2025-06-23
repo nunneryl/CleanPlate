@@ -9,13 +9,11 @@ from flask_cors import CORS
 import psycopg2
 import psycopg2.extras
 
-# Import from our utility file and other modules
 from utils import normalize_search_term_for_hybrid
 from db_manager import DatabaseConnection
 from config import APIConfig
 
 try:
-    # This import is now safe because of the utils.py refactor
     from update_database import run_database_update
     update_logic_imported = True
 except ImportError:
@@ -101,25 +99,21 @@ def search():
 
     normalized_search = normalize_search_term_for_hybrid(search_term)
     
-    # Build WHERE clause and parameters
-    name_filter_clause = "(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"
-    name_params = [f"%{normalized_search}%", normalized_search]
+    where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
+    params = [f"%{normalized_search}%", normalized_search]
 
-    other_filter_conditions = []
-    other_filter_params = []
     if grade_filter:
-        other_filter_conditions.append("grade = %s")
-        other_filter_params.append(grade_filter.upper())
+        where_conditions.append("grade = %s")
+        params.append(grade_filter.upper())
     if boro_filter:
-        other_filter_conditions.append("boro ILIKE %s")
-        other_filter_params.append(boro_filter)
+        where_conditions.append("boro ILIKE %s")
+        params.append(boro_filter)
     if cuisine_filter:
-        other_filter_conditions.append("cuisine_description ILIKE %s")
-        other_filter_params.append(f"%{cuisine_filter}%")
+        where_conditions.append("cuisine_description ILIKE %s")
+        params.append(f"%{cuisine_filter}%")
     
-    other_filters_clause = (" AND ".join(other_filter_conditions)) if other_filter_conditions else "TRUE"
+    where_clause = " AND ".join(where_conditions)
 
-    # Build ORDER BY clause
     order_by_clause = ""
     order_by_params = []
     if sort_option == 'name_asc':
@@ -142,27 +136,26 @@ def search():
         """
         order_by_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
-    # High-Performance Query to get just the paginated IDs
     id_fetch_query = f"""
-        WITH matching_restaurants AS (
-            SELECT * FROM restaurants WHERE {name_filter_clause}
-        ),
-        latest_matching AS (
-            SELECT DISTINCT ON (camis) * FROM matching_restaurants ORDER BY camis, inspection_date DESC
-        )
-        SELECT camis FROM latest_matching
-        WHERE {other_filters_clause}
+        SELECT camis FROM (
+            SELECT DISTINCT ON (camis) camis, dba, dba_normalized_search, grade, inspection_date, cuisine_description, boro
+            FROM restaurants
+            ORDER BY camis, inspection_date DESC
+        ) AS latest_restaurants
+        WHERE {where_clause}
         {order_by_clause}
         LIMIT %s OFFSET %s;
     """
     
     offset = (page - 1) * per_page
-    id_fetch_params = tuple(name_params + other_filter_params + order_by_params + [per_page, offset])
+    id_fetch_params = tuple(params + order_by_params + [per_page, offset])
 
     try:
-        with DatabaseConnection() as conn, conn.cursor() as cursor:
-            cursor.execute(id_fetch_query, id_fetch_params)
-            paginated_camis_tuples = cursor.fetchall()
+        with DatabaseConnection() as conn:
+            # Use a standard cursor for the first query to get IDs
+            with conn.cursor() as cursor:
+                cursor.execute(id_fetch_query, id_fetch_params)
+                paginated_camis_tuples = cursor.fetchall()
             
             if not paginated_camis_tuples:
                 return jsonify([])
@@ -175,6 +168,7 @@ def search():
                 LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
                 WHERE r.camis = ANY(%s)
             """
+            # ** THE FIX IS HERE: Use a separate DictCursor for the details query **
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as details_cursor:
                 details_cursor.execute(details_query, (paginated_camis,))
                 all_rows = details_cursor.fetchall()
@@ -183,7 +177,6 @@ def search():
         logger.error(f"DB search failed for '{search_term}': {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
-    # Process results, preserving the correct sort order
     restaurant_details_map = {str(camis): [] for camis in paginated_camis}
     for row in all_rows:
         restaurant_details_map[str(row['camis'])].append(row)
@@ -194,8 +187,8 @@ def search():
         rows_for_restaurant = restaurant_details_map.get(camis_str)
         if not rows_for_restaurant:
             continue
-
         base_info = dict(rows_for_restaurant[0])
+        
         inspections = {}
         for row in rows_for_restaurant:
             insp_date_str = row['inspection_date'].isoformat()
@@ -224,12 +217,11 @@ def recent_restaurants():
 
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
-    # Import locally to avoid circular dependency at startup
     try:
         from update_database import run_database_update
     except ImportError:
         return jsonify({"status": "error", "message": "Update logic currently unavailable."}), 503
-
+        
     provided_key = request.headers.get('X-Update-Secret')
     expected_key = APIConfig.UPDATE_SECRET_KEY
     if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
