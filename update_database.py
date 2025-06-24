@@ -6,7 +6,6 @@ import argparse
 from datetime import datetime, timedelta
 from dateutil.parser import parse as date_parse
 import psycopg
-from psycopg.extras import execute_values
 
 from db_manager import DatabaseConnection
 from config import APIConfig
@@ -59,7 +58,6 @@ def update_database_batch(data):
         if not (camis and inspection_date): continue
         
         dba = item.get("dba")
-        # Use the imported normalization function
         normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
 
         restaurants_to_insert.append((
@@ -86,21 +84,21 @@ def update_database_batch(data):
                     camis, dba, dba_normalized_search, boro, building, street, zipcode, phone,
                     latitude, longitude, grade, inspection_date, critical_flag,
                     inspection_type, cuisine_description, grade_date
-                ) VALUES %s ON CONFLICT (camis, inspection_date) DO UPDATE SET
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (camis, inspection_date) DO UPDATE SET
                     dba = EXCLUDED.dba,
                     dba_normalized_search = EXCLUDED.dba_normalized_search,
                     boro = EXCLUDED.boro,
                     grade = EXCLUDED.grade;
             """
-            psycopg2.extras.execute_values(cursor, upsert_sql, unique_restaurants, page_size=200)
+            cursor.executemany(upsert_sql, unique_restaurants)
             r_count = cursor.rowcount
             logger.info(f"Restaurant insert executed. Affected rows: {r_count}")
 
         if violations_to_insert:
             unique_violations = list(set(violations_to_insert))
             logger.info(f"Executing batch insert for {len(unique_violations)} unique violations...")
-            insert_sql = "INSERT INTO violations (camis, inspection_date, violation_code, violation_description) VALUES %s ON CONFLICT DO NOTHING;"
-            execute_values(cursor, insert_sql, unique_violations, page_size=1000)
+            insert_sql = "INSERT INTO violations (camis, inspection_date, violation_code, violation_description) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING;"
+            cursor.executemany(insert_sql, unique_violations)
             v_count = cursor.rowcount
             logger.info(f"Violation insert executed. Affected rows: {v_count}")
         
@@ -125,3 +123,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     run_database_update(days_back=args.days)
     logger.info("Script execution finished.")
+    
+from db_manager import DatabaseManager
+DatabaseManager.close_all_connections()
+logger.info("Database connection pool closed.")

@@ -61,7 +61,7 @@ class DatabaseManager:
         """Close all connections in the pool"""
         if cls._connection_pool is not None:
             try:
-                cls._connection_pool.closeall()
+                cls._connection_pool.close()
                 logger.info("All database connections closed.")
                 cls._connection_pool = None
             except Exception as e:
