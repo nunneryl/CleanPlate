@@ -1,10 +1,10 @@
-# db_manager.py - Redis Lazy Initialization Fix
+# db_manager.py
 
 import logging
-import psycopg2
-from psycopg2 import pool
+import psycopg
+from psycopg_pool import ConnectionPool
 import redis
-import threading # Import threading for locking
+import threading
 
 # Import config classes needed
 from config import DatabaseConfig, RedisConfig, load_dotenv # Ensure load_dotenv is imported if used
@@ -24,12 +24,7 @@ class DatabaseManager:
         try:
             # Use Railway standard PG* vars read by DatabaseConfig
             logger.info(f"Initializing database connection pool for {DatabaseConfig.DB_NAME} on {DatabaseConfig.DB_HOST}:{DatabaseConfig.DB_PORT}")
-            cls._connection_pool = pool.ThreadedConnectionPool(
-                min_connections, max_connections,
-                user=DatabaseConfig.DB_USER, password=DatabaseConfig.DB_PASSWORD,
-                host=DatabaseConfig.DB_HOST, port=DatabaseConfig.DB_PORT,
-                dbname=DatabaseConfig.DB_NAME
-            )
+            cls._connection_pool = ConnectionPool(conninfo=DatabaseConfig.get_connection_string(), min_size=min_connections, max_size=max_connections)
             logger.info("Database connection pool initialized successfully.")
         except psycopg2.OperationalError as e:
              logger.critical(f"Database connection failed: Check credentials/host/port/db name. Error: {e}", exc_info=True)

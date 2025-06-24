@@ -5,8 +5,8 @@ import logging
 import argparse
 from datetime import datetime, timedelta
 from dateutil.parser import parse as date_parse
-import psycopg2
-import psycopg2.extras
+import psycopg
+from psycopg.extras import execute_values
 
 from db_manager import DatabaseConnection
 from config import APIConfig
@@ -100,7 +100,7 @@ def update_database_batch(data):
             unique_violations = list(set(violations_to_insert))
             logger.info(f"Executing batch insert for {len(unique_violations)} unique violations...")
             insert_sql = "INSERT INTO violations (camis, inspection_date, violation_code, violation_description) VALUES %s ON CONFLICT DO NOTHING;"
-            psycopg2.extras.execute_values(cursor, insert_sql, unique_violations, page_size=1000)
+            execute_values(cursor, insert_sql, unique_violations, page_size=1000)
             v_count = cursor.rowcount
             logger.info(f"Violation insert executed. Affected rows: {v_count}")
         

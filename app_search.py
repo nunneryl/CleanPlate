@@ -6,8 +6,8 @@ import threading
 import secrets
 from flask import Flask, jsonify, request, g
 from flask_cors import CORS
-import psycopg2
-import psycopg2.extras
+import psycopg
+from psycopg.rows import dict_row
 
 from db_manager import DatabaseConnection
 from config import APIConfig
@@ -172,7 +172,8 @@ def search():
                 LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
                 WHERE r.camis = ANY(%s)
             """
-            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as details_cursor:
+            conn.row_factory = dict_row
+            with conn.cursor() as details_cursor:
                 details_cursor.execute(details_query, (paginated_camis,))
                 all_rows = details_cursor.fetchall()
 
