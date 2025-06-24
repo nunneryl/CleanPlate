@@ -1,6 +1,6 @@
 # correct_normalization_backfill.py
-import psycopg2
-import psycopg2.extras
+import psycopg
+from psycopg.rows import dict_row
 import re
 import os
 import logging
@@ -50,20 +50,21 @@ def run_corrective_backfill(batch_size=500):
 
     updated_count = 0
     processed_count = 0
+    conn = None # Define conn here to ensure it's in scope for the finally block
     
     try:
         logger.info("Connecting to the database...")
-        conn = psycopg2.connect(conn_string)
+        conn = psycopg.connect(conn_string, row_factory=dict_row)
         
         with conn.cursor() as cursor_count:
             cursor_count.execute("SELECT COUNT(*) FROM restaurants;")
-            total_rows = cursor_count.fetchone()[0]
+            total_rows = cursor_count.fetchone()['count']
             logger.info(f"Total restaurant records to process: {total_rows}")
 
         offset = 0
         while processed_count < total_rows:
             logger.info(f"Fetching batch of records (offset: {offset}, limit: {batch_size})...")
-            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor_select:
+            with conn.cursor() as cursor_select:
                 cursor_select.execute(
                     "SELECT camis, inspection_date, dba FROM restaurants ORDER BY camis, inspection_date LIMIT %s OFFSET %s;",
                     (batch_size, offset)
@@ -79,7 +80,9 @@ def run_corrective_backfill(batch_size=500):
                     continue
                 
                 normalized_dba = normalize_text_final(row['dba'])
-                updates_to_execute.append((normalized_dba, row['camis'], row['inspection_date']))
+                # This prepares parameters for the UPDATE query below
+                update_params = (normalized_dba, normalized_dba, row['camis'], row['inspection_date'])
+                updates_to_execute.append(update_params)
 
             if updates_to_execute:
                 with conn.cursor() as cursor_update:
@@ -87,12 +90,10 @@ def run_corrective_backfill(batch_size=500):
                         UPDATE restaurants
                         SET 
                             dba_normalized_search = %s,
-                            dba_tsv = to_tsvector('public.restaurant_search_config', %s)
+                            dba_tsv = to_tsvector('simple', %s)
                         WHERE camis = %s AND inspection_date = %s
                     """
-                    # We need to pass the normalized_dba twice for the two %s placeholders
-                    update_params = [(norm_dba, norm_dba, camis, insp_date) for norm_dba, camis, insp_date in updates_to_execute]
-                    psycopg2.extras.execute_batch(cursor_update, update_query, update_params)
+                    cursor_update.executemany(update_query, updates_to_execute)
                     updated_count += cursor_update.rowcount
 
             processed_count += len(rows)
@@ -105,7 +106,7 @@ def run_corrective_backfill(batch_size=500):
     except Exception as e:
         logger.error(f"An error occurred: {e}", exc_info=True)
     finally:
-        if 'conn' in locals() and conn:
+        if conn:
             conn.close()
             logger.info("Database connection closed.")
 
