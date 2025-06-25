@@ -102,7 +102,6 @@ def update_database_batch(data):
             v_count = cursor.rowcount
             logger.info(f"Violation insert executed. Affected rows: {v_count}")
         
-        conn.commit()
         logger.info("DB transaction committed.")
 
     return r_count, v_count

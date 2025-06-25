@@ -21,8 +21,13 @@ class DatabaseManager:
         if cls._connection_pool is not None:
             logger.info("Database connection pool already initialized.")
             return
+            
+# --- ADD THIS LOGGING BLOCK ---
+        connection_string_for_debug = DatabaseConfig.get_connection_string()
+        logger.info(f"DEBUG: Attempting to connect with URL: {connection_string_for_debug}")
+# ------------------------------
+
         try:
-            # Use Railway standard PG* vars read by DatabaseConfig
             logger.info(f"Initializing database connection pool for {DatabaseConfig.DB_NAME} on {DatabaseConfig.DB_HOST}:{DatabaseConfig.DB_PORT}")
             cls._connection_pool = ConnectionPool(conninfo=DatabaseConfig.get_connection_string(), min_size=min_connections, max_size=max_connections)
             logger.info("Database connection pool initialized successfully.")
@@ -76,6 +81,7 @@ class DatabaseConnection:
     def __enter__(self):
         try:
             self.conn = DatabaseManager.get_connection()
+            self.conn.autocommit = True
             logger.debug("Database connection acquired from pool.")
             return self.conn
         except Exception as e:

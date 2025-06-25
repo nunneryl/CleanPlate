@@ -54,7 +54,7 @@ def run_corrective_backfill(batch_size=500):
     
     try:
         logger.info("Connecting to the database...")
-        conn = psycopg.connect(conn_string, row_factory=dict_row)
+        conn = psycopg.connect(conn_string, row_factory=dict_row, autocommit=True)
         
         with conn.cursor() as cursor_count:
             cursor_count.execute("SELECT COUNT(*) FROM restaurants;")
@@ -98,7 +98,6 @@ def run_corrective_backfill(batch_size=500):
 
             processed_count += len(rows)
             offset += batch_size
-            conn.commit()
             logger.info(f"Batch committed. Processed: {processed_count}/{total_rows}. Updated so far: {updated_count}")
             
         logger.info("Corrective backfill process completed.")
