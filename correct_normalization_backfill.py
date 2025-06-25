@@ -17,7 +17,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- CANONICAL NORMALIZATION FUNCTION (Copied from app_search.py) ---
+# --- CANONICAL NORMALIZATION FUNCTION ---
 def normalize_text_final(text):
     if not isinstance(text, str):
         return ''
@@ -30,13 +30,13 @@ def normalize_text_final(text):
     }
     for accented, unaccented in accent_map.items():
         normalized_text = normalized_text.replace(accented, unaccented)
-    normalized_text = re.sub(r"['./-]", " ", normalized_text)
+    normalized_text = re.sub(r"['./-]", "", normalized_text)
     normalized_text = re.sub(r"[^a-z0-9\s]", "", normalized_text)
     normalized_text = re.sub(r"\s+", " ", normalized_text).strip()
     return normalized_text
 
 def get_db_connection_string():
-    conn_str = os.environ.get('DATABASE_URL') # Assumes Railway's standard DATABASE_URL
+    conn_str = os.environ.get('DATABASE_URL')
     if not conn_str:
         logger.error("DATABASE_URL environment variable not set.")
         conn_str = input("Please paste your full PostgreSQL connection URL: ")
@@ -50,7 +50,7 @@ def run_corrective_backfill(batch_size=500):
 
     updated_count = 0
     processed_count = 0
-    conn = None # Define conn here to ensure it's in scope for the finally block
+    conn = None
     
     try:
         logger.info("Connecting to the database...")
@@ -80,25 +80,25 @@ def run_corrective_backfill(batch_size=500):
                     continue
                 
                 normalized_dba = normalize_text_final(row['dba'])
-                # This prepares parameters for the UPDATE query below
-                update_params = (normalized_dba, normalized_dba, row['camis'], row['inspection_date'])
+                update_params = (normalized_dba, row['camis'], row['inspection_date'])
                 updates_to_execute.append(update_params)
 
             if updates_to_execute:
                 with conn.cursor() as cursor_update:
+                    # UPDATED: Removed the dba_tsv column from the query
                     update_query = """
                         UPDATE restaurants
                         SET 
-                            dba_normalized_search = %s,
-                            dba_tsv = to_tsvector('simple', %s)
+                            dba_normalized_search = %s
                         WHERE camis = %s AND inspection_date = %s
                     """
                     cursor_update.executemany(update_query, updates_to_execute)
                     updated_count += cursor_update.rowcount
-
+            
             processed_count += len(rows)
             offset += batch_size
-            logger.info(f"Batch committed. Processed: {processed_count}/{total_rows}. Updated so far: {updated_count}")
+            # No conn.commit() needed due to autocommit=True
+            logger.info(f"Batch processed. Processed: {processed_count}/{total_rows}. Updated so far: {updated_count}")
             
         logger.info("Corrective backfill process completed.")
 

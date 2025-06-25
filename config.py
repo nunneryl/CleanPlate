@@ -15,12 +15,11 @@ class DatabaseConfig:
     DB_PASSWORD = os.environ.get("PGPASSWORD", None)           # Use PGPASSWORD
     DB_HOST = os.environ.get("PGHOST", "localhost")            # Use PGHOST
     DB_PORT = os.environ.get("PGPORT", "5432")                 # Use PGPORT
-
+    
     @classmethod
     def get_connection_string(cls):
         """Return a database connection string using PG* vars"""
         password_part = f":{cls.DB_PASSWORD}" if cls.DB_PASSWORD else ""
-        # Construct using the variables read above
         return f"postgresql://{cls.DB_USER}{password_part}@{cls.DB_HOST}:{cls.DB_PORT}/{cls.DB_NAME}"
 
 # API and App configuration
