@@ -170,7 +170,7 @@ def search():
             if not paginated_camis_tuples:
                 return jsonify([])
 
-            paginated_camis = [item[0] for item in paginated_camis_tuples]
+            paginated_camis = [item['camis'] for item in paginated_camis_tuples]
             
             details_query = """
                 SELECT r.*, v.violation_code, v.violation_description
