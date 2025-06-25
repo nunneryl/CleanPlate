@@ -12,17 +12,20 @@ class DatabaseManager:
 
     @classmethod
     def initialize_pool(cls, min_connections=1, max_connections=10):
+        """Initialize the database connection pool"""
         if cls._connection_pool is not None:
             logger.info("Database connection pool already initialized.")
             return
 
         try:
+            # Get the connection string directly and use it
+            conn_str = DatabaseConfig.get_connection_string()
             logger.info(f"Initializing database connection pool for {DatabaseConfig.DB_NAME} on {DatabaseConfig.DB_HOST}:{DatabaseConfig.DB_PORT}")
-            cls._connection_pool = ConnectionPool(conninfo=connection_string_for_debug, min_size=min_connections, max_size=max_connections)
+            cls._connection_pool = ConnectionPool(conninfo=conn_str, min_size=min_connections, max_size=max_connections)
             logger.info("Database connection pool initialized successfully.")
         except psycopg.OperationalError as e:
-             logger.critical(f"Database connection failed: Check credentials/host/port/db name. Error: {e}", exc_info=True)
-             raise
+            logger.critical(f"Database connection failed: Check credentials/host/port/db name. Error: {e}", exc_info=True)
+            raise
 
     @classmethod
     def get_connection(cls):
