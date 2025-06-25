@@ -163,6 +163,9 @@ def search():
 
     try:
         with DatabaseConnection() as conn:
+            # MOVED THIS LINE to be the first thing after getting the connection
+            conn.row_factory = dict_row
+
             with conn.cursor() as cursor:
                 cursor.execute(id_fetch_query, id_fetch_params)
                 paginated_camis_tuples = cursor.fetchall()
@@ -170,6 +173,7 @@ def search():
             if not paginated_camis_tuples:
                 return jsonify([])
 
+            # This line will now work because the row_factory is set correctly
             paginated_camis = [item['camis'] for item in paginated_camis_tuples]
             
             details_query = """
@@ -178,7 +182,6 @@ def search():
                 LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
                 WHERE r.camis = ANY(%s)
             """
-            conn.row_factory = dict_row
             with conn.cursor() as details_cursor:
                 details_cursor.execute(details_query, (paginated_camis,))
                 all_rows = details_cursor.fetchall()
