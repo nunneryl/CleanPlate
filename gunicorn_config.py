@@ -8,8 +8,7 @@ accesslog = '-' # Send access logs to stdout
 loglevel = 'info' # Set the log level
 
 # --- REVERTED WORKER TIMEOUT ---
-# Set back to a reasonable timeout for daily operations (e.g., 180 seconds = 3 minutes)
-timeout = 600
+timeout = 90
 
 # Optional: Bind to the port specified by Railway
 # bind = f"0.0.0.0:{os.environ.get('PORT', '8080')}"
