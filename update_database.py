@@ -42,6 +42,11 @@ def update_database_batch(data):
     violations_to_insert = []
 
     for item in data:
+    
+            # --- ADD THIS LINE FOR DEBUGGING ---
+        print(f"Processing Record: {item.get('dba')} - {item.get('inspection_date')}")
+        # ------------------------------------
+    
         camis = item.get("camis")
         inspection_date = convert_date(item.get("inspection_date"))
         if not (camis and inspection_date): continue
