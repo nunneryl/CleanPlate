@@ -28,7 +28,7 @@ def convert_date(date_str):
     except (ValueError, TypeError):
         return None
 
-def fetch_data(days_back=15):
+def fetch_data(days_back=30):
     logger.info(f"Fetching data from NYC API for past {days_back} days...")
     query = f"https://data.cityofnewyork.us/resource/43nn-pn8j.json?$where=inspection_date >= '{(datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')}T00:00:00.000'&$limit=50000"
     try:
@@ -109,7 +109,7 @@ def update_database_batch(data):
 
     return r_count, v_count
 
-def run_database_update(days_back=15):
+def run_database_update(days_back=30):
     logger.info(f"Starting DB update (days_back={days_back})")
     data = fetch_data(days_back=days_back)
     if data:
@@ -121,7 +121,7 @@ def run_database_update(days_back=15):
 
 if __name__ == '__main__':
     # We no longer need the argument parser for scheduled runs
-    run_database_update(days_back=15)
+    run_database_update(days_back=30)
     logger.info("Script execution finished.")
     
 # Closing the pool is handled by Railway's process management, so this is not strictly necessary for scheduled runs.
