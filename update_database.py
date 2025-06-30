@@ -1,4 +1,4 @@
-# FINAL PRODUCTION-READY update_database.py
+# In update_database.py
 
 import os
 import logging
@@ -12,7 +12,6 @@ import psycopg
 from db_manager import DatabaseConnection, DatabaseManager
 from config import APIConfig
 
-# Use a more detailed logger setup
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     handler = logging.StreamHandler()
@@ -55,6 +54,7 @@ def update_database_batch(data):
         dba = item.get("dba")
         normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
 
+        # This is the list of data we save for each inspection
         restaurants_to_insert.append((
             camis, dba, normalized_dba,
             item.get("boro"), item.get("building"), item.get("street"),
@@ -63,30 +63,36 @@ def update_database_batch(data):
             float(item.get("longitude")) if item.get("longitude") and item.get("longitude") not in ['N/A', ''] else None,
             item.get("grade"), inspection_date, item.get("critical_flag"),
             item.get("inspection_type"), item.get("cuisine_description"),
-            convert_date(item.get("grade_date"))
+            convert_date(item.get("grade_date")),
+            item.get("action") # <-- ADDED: Read the 'action' field from the API data
         ))
         
         if item.get("violation_code"):
              violations_to_insert.append((camis, inspection_date, item.get("violation_code"), item.get("violation_description")))
 
-    # --- NEW EXPLICIT TRANSACTION BLOCK ---
     conn = None
     r_count, v_count = 0, 0
     try:
         conn = DatabaseManager.get_connection()
-        conn.autocommit = False  # Take manual control of the transaction
+        conn.autocommit = False
 
         with conn.cursor() as cursor:
             if restaurants_to_insert:
                 unique_restaurants = list({(r[0], r[11]): r for r in restaurants_to_insert}.values())
                 logger.info(f"Executing batch insert for {len(unique_restaurants)} unique restaurant inspections...")
+                # --- MODIFIED SQL a little bit ---
                 upsert_sql = """
-                    INSERT INTO restaurants (camis, dba, dba_normalized_search, boro, building, street, zipcode, phone, latitude, longitude, grade, inspection_date, critical_flag, inspection_type, cuisine_description, grade_date)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO restaurants (
+                        camis, dba, dba_normalized_search, boro, building, street, zipcode, phone,
+                        latitude, longitude, grade, inspection_date, critical_flag,
+                        inspection_type, cuisine_description, grade_date, action
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (camis, inspection_date) DO UPDATE SET
                         dba = EXCLUDED.dba, dba_normalized_search = EXCLUDED.dba_normalized_search,
-                        boro = EXCLUDED.boro, grade = EXCLUDED.grade;
+                        boro = EXCLUDED.boro, grade = EXCLUDED.grade,
+                        action = EXCLUDED.action;
                 """
+                # --- END MODIFIED SQL ---
                 cursor.executemany(upsert_sql, unique_restaurants)
                 r_count = cursor.rowcount
                 logger.info(f"Restaurant insert command executed. Affected rows: {r_count}")
@@ -100,18 +106,14 @@ def update_database_batch(data):
                 logger.info(f"Violation insert command executed. Affected rows: {v_count}")
         
         logger.info("Explicitly committing transaction...")
-        conn.commit()  # This saves all the changes for good
+        conn.commit()
         logger.info("Transaction committed successfully.")
 
     except Exception as e:
         logger.error(f"DATABASE TRANSACTION FAILED: {e}", exc_info=True)
-        if conn:
-            logger.info("Rolling back transaction due to error.")
-            conn.rollback()
+        if conn: conn.rollback()
     finally:
-        if conn:
-            DatabaseManager.return_connection(conn) # Always return the connection to the pool
-    # ------------------------------------
+        if conn: DatabaseManager.return_connection(conn)
 
     return r_count, v_count
 
