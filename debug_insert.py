@@ -1,4 +1,4 @@
-# debug_insert.py
+# debug_insert.py (Final Version with Explicit Transaction Control)
 import os
 import logging
 from datetime import datetime, timedelta
@@ -7,25 +7,19 @@ import requests
 import psycopg
 from psycopg.rows import dict_row
 
-# --- These are copied from your project's other files ---
 from db_manager import DatabaseConnection, DatabaseManager
 from utils import normalize_search_term_for_hybrid
 from config import APIConfig
-# ----------------------------------------------------
 
-# Setup a detailed logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# The CAMIS ID for "MILK & PULL" that we are hunting for
 TARGET_CAMIS = '50032994'
 
 def convert_date(date_str):
     if not date_str or not isinstance(date_str, str): return None
-    try:
-        return date_parse(date_str).date()
-    except (ValueError, TypeError):
-        return None
+    try: return date_parse(date_str).date()
+    except (ValueError, TypeError): return None
 
 def fetch_data(days_back=30):
     logger.info(f"--> Fetching data from NYC API for past {days_back} days...")
@@ -35,24 +29,21 @@ def fetch_data(days_back=30):
         response = requests.get(query, timeout=90)
         response.raise_for_status()
         data = response.json()
-        logger.info(f"--> Successfully fetched {len(data)} records from API.")
+        logger.info(f"--> Successfully fetched {len(data)} records.")
         return data
     except Exception as e:
         logger.error(f"--> API fetch error: {e}")
         return []
 
 def find_and_insert_specific_restaurant():
-    # Ensure the database connection pool is ready
     DatabaseManager.initialize_pool()
     logger.info(f"--- STARTING DEBUG SCRIPT for CAMIS: {TARGET_CAMIS} ---")
 
-    # 1. Fetch all recent data
     data = fetch_data()
     if not data:
         logger.error("STOP: Failed to fetch any data from API.")
         return
 
-    # 2. Find the most recent inspection record for our target restaurant
     target_item = None
     for item in data:
         if item.get("camis") == TARGET_CAMIS:
@@ -60,13 +51,12 @@ def find_and_insert_specific_restaurant():
                 target_item = item
     
     if not target_item:
-        logger.error(f"STOP: Could not find CAMIS {TARGET_CAMIS} in the {len(data)} records fetched from the API.")
+        logger.error(f"STOP: Could not find CAMIS {TARGET_CAMIS} in the fetched API data.")
         DatabaseManager.close_all_connections()
         return
 
-    logger.info(f"SUCCESS: Found target record to process: {target_item}")
+    logger.info(f"SUCCESS: Found target record to process.")
 
-    # 3. Prepare the data tuple for the 'restaurants' table
     try:
         inspection_date = convert_date(target_item.get("inspection_date"))
         restaurant_tuple = (
@@ -79,65 +69,61 @@ def find_and_insert_specific_restaurant():
             target_item.get("inspection_type"), target_item.get("cuisine_description"),
             convert_date(target_item.get("grade_date"))
         )
-        logger.info(f"SUCCESS: Prepared restaurant data tuple for insertion.")
+        violation_tuple = (
+            target_item.get("camis"), inspection_date,
+            target_item.get("violation_code"), target_item.get("violation_description")
+        ) if target_item.get("violation_code") else None
     except Exception as e:
-        logger.error(f"STOP: Failed to prepare restaurant data tuple: {e}")
+        logger.error(f"STOP: Failed to prepare data tuples: {e}")
         DatabaseManager.close_all_connections()
         return
 
-    # 4. Prepare the data tuple for the 'violations' table
-    violation_tuple = None
-    if target_item.get("violation_code"):
-        try:
-            violation_tuple = (
-                target_item.get("camis"),
-                inspection_date,
-                target_item.get("violation_code"),
-                target_item.get("violation_description")
-            )
-            logger.info("SUCCESS: Prepared violation data tuple for insertion.")
-        except Exception as e:
-            logger.error(f"STOP: Failed to prepare violation data tuple: {e}")
-            DatabaseManager.close_all_connections()
-            return
-
-    # 5. Attempt to insert the records
+    # --- NEW EXPLICIT TRANSACTION BLOCK ---
+    conn = None
     try:
-        with DatabaseConnection() as conn, conn.cursor() as cursor:
-            logger.info("--> Attempting to insert the single restaurant record...")
+        conn = DatabaseManager.get_connection()
+        conn.autocommit = False # Turn off autocommit for this transaction
+        
+        with conn.cursor() as cursor:
+            logger.info("--> Attempting to insert restaurant record...")
             upsert_sql = """
                 INSERT INTO restaurants (camis, dba, dba_normalized_search, boro, building, street, zipcode, phone, latitude, longitude, grade, inspection_date, critical_flag, inspection_type, cuisine_description, grade_date)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (camis, inspection_date) DO NOTHING;
             """
             cursor.execute(upsert_sql, restaurant_tuple)
-            logger.info(f"--> Restaurant INSERT command executed. Affected rows: {cursor.rowcount}")
+            logger.info("--> Restaurant INSERT command executed.")
 
             if violation_tuple:
-                logger.info("--> Attempting to insert the single violation record...")
+                logger.info("--> Attempting to insert violation record...")
                 insert_sql = "INSERT INTO violations (camis, inspection_date, violation_code, violation_description) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING;"
                 cursor.execute(insert_sql, violation_tuple)
-                logger.info(f"--> Violation INSERT command executed. Affected rows: {cursor.rowcount}")
+                logger.info("--> Violation INSERT command executed.")
+        
+        logger.info("--> Explicitly committing transaction...")
+        conn.commit() # This is the crucial step to save the data
+        logger.info("--> Transaction committed successfully.")
 
     except Exception as e:
-        logger.error(f"STOP: DATABASE INSERT FAILED: {e}", exc_info=True)
-        DatabaseManager.close_all_connections()
-        return
+        logger.error(f"STOP: DATABASE TRANSACTION FAILED: {e}", exc_info=True)
+        if conn: conn.rollback() # Rollback on error
+    finally:
+        if conn: DatabaseManager.return_connection(conn) # Return connection to the pool
+    # ------------------------------------
 
+    # ... Verification step remains the same ...
     logger.info("--- VERIFICATION STEP ---")
-    # 6. Immediately query the database to see if the record exists
     try:
         with DatabaseConnection() as conn, conn.cursor(row_factory=dict_row) as cursor:
             logger.info(f"--> Querying DB for CAMIS {TARGET_CAMIS} to verify insert...")
             verify_sql = "SELECT dba, inspection_date, grade FROM restaurants WHERE camis = %s ORDER BY inspection_date DESC;"
             cursor.execute(verify_sql, (TARGET_CAMIS,))
             results = cursor.fetchall()
-            if results and any(r['inspection_date'] == inspection_date for r in results):
+            if results and any(r['inspection_date'].strftime('%Y-%m-%d') == inspection_date.strftime('%Y-%m-%d') for r in results):
                 logger.info(f"***** SUCCESS! Found a matching record in the DB! *****")
-                logger.info(f"Latest records in DB: {results}")
+                logger.info(f"All records in DB: {results}")
             else:
                 logger.error(f"***** FAILURE! No matching record found in DB after insert attempt. *****")
-                logger.info(f"Records currently in DB: {results}")
     except Exception as e:
         logger.error(f"STOP: DATABASE VERIFICATION FAILED: {e}", exc_info=True)
     
