@@ -158,21 +158,23 @@ def search():
         
     return jsonify(final_results)
 
-# This endpoint should be in its normal state for daily operation
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
     try:
-        from update_database import run_database_update
-    except ImportError:
+        from update_database import run_historical_backfill
+    except ImportError as e:
+        logger.error(f"Import Error in trigger_update: {e}")
         return jsonify({"status": "error", "message": "Update logic currently unavailable."}), 503
-        
+
     provided_key = request.headers.get('X-Update-Secret')
     expected_key = APIConfig.UPDATE_SECRET_KEY
     if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
         return jsonify({"status": "error", "message": "Unauthorized."}), 403
-    
-    threading.Thread(target=run_database_update, args=(15,), daemon=True).start()
-    return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
+
+    year_to_process = 2024
+    logger.info(f"Triggering historical backfill for year {year_to_process}...")
+    threading.Thread(target=run_historical_backfill, args=(year_to_process,), daemon=True).start()
+    return jsonify({"status": "success", "message": f"Historical backfill for {year_to_process} triggered."}), 202
 
 @app.errorhandler(404)
 def not_found_error_handler(error):
