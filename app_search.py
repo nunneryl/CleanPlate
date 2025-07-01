@@ -93,7 +93,6 @@ def search():
 
     try:
         with DatabaseConnection() as conn:
-            # MOVED THIS LINE to be the first thing after getting the connection
             conn.row_factory = dict_row
 
             with conn.cursor() as cursor:
@@ -103,7 +102,6 @@ def search():
             if not paginated_camis_tuples:
                 return jsonify([])
 
-            # This line will now work because the row_factory is set correctly
             paginated_camis = [item['camis'] for item in paginated_camis_tuples]
             
             details_query = """
@@ -137,30 +135,34 @@ def search():
             insp_date_str = row['inspection_date'].isoformat()
             if insp_date_str not in inspections:
                 inspections[insp_date_str] = {
-                    'inspection_date': insp_date_str, 'grade': row['grade'],
-                    'critical_flag': row['critical_flag'], 'inspection_type': row['inspection_type'],
+                    'inspection_date': insp_date_str,
+                    'grade': row.get('grade'),
+                    'critical_flag': row.get('critical_flag'),
+                    'inspection_type': row.get('inspection_type'),
+                    'action': row.get('action'),  # <-- This is the important new field
                     'violations': []
                 }
-            if row['violation_code']:
+            if row.get('violation_code'):
                 v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
                 if v_data not in inspections[insp_date_str]['violations']:
                     inspections[insp_date_str]['violations'].append(v_data)
 
         base_info['inspections'] = sorted(list(inspections.values()), key=lambda x: x['inspection_date'], reverse=True)
-        for key in ['violation_code', 'violation_description', 'grade', 'inspection_date', 'critical_flag', 'inspection_type']:
+        
+        # Pop all inspection-level keys from the top-level restaurant object
+        for key in ['violation_code', 'violation_description', 'grade', 'inspection_date', 'critical_flag', 'inspection_type', 'action']:
             base_info.pop(key, None)
             
         final_results.append(base_info)
         
     return jsonify(final_results)
 
+# This endpoint is now restored to its normal daily operation state
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
     try:
-        # Import the standard daily update function
         from update_database import run_database_update
-    except ImportError as e:
-        logger.error(f"Import Error in trigger_update: {e}")
+    except ImportError:
         return jsonify({"status": "error", "message": "Update logic currently unavailable."}), 503
         
     provided_key = request.headers.get('X-Update-Secret')
@@ -168,11 +170,8 @@ def trigger_update():
     if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
         return jsonify({"status": "error", "message": "Unauthorized."}), 403
     
-
-    logger.info("Triggering standard 15-day database update...")
     threading.Thread(target=run_database_update, args=(15,), daemon=True).start()
     return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
-
 
 @app.errorhandler(404)
 def not_found_error_handler(error):
