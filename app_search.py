@@ -1,6 +1,7 @@
-# FINAL app_search.py
 import os
+import re
 import logging
+import json
 import threading
 import secrets
 from utils import normalize_search_term_for_hybrid
@@ -133,16 +134,14 @@ def search():
         for row in rows_for_restaurant:
             insp_date_str = row['inspection_date'].isoformat()
             if insp_date_str not in inspections:
-                # --- THIS IS THE CORRECTED BLOCK ---
                 inspections[insp_date_str] = {
                     'inspection_date': insp_date_str,
                     'grade': row.get('grade'),
                     'critical_flag': row.get('critical_flag'),
                     'inspection_type': row.get('inspection_type'),
-                    'action': row.get('action'),  # <-- Ensure 'action' field is added here
+                    'action': row.get('action'),
                     'violations': []
                 }
-                # -----------------------------------
             if row.get('violation_code'):
                 v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
                 if v_data not in inspections[insp_date_str]['violations']:
@@ -150,7 +149,6 @@ def search():
 
         base_info['inspections'] = sorted(list(inspections.values()), key=lambda x: x['inspection_date'], reverse=True)
         
-        # This loop now correctly removes all inspection-level data from the top-level object
         for key in ['violation_code', 'violation_description', 'grade', 'inspection_date', 'critical_flag', 'inspection_type', 'action']:
             base_info.pop(key, None)
             
@@ -158,23 +156,21 @@ def search():
         
     return jsonify(final_results)
 
+# This endpoint is now restored to its normal daily operation state
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
     try:
-        from update_database import run_historical_backfill
-    except ImportError as e:
-        logger.error(f"Import Error in trigger_update: {e}")
+        from update_database import run_database_update
+    except ImportError:
         return jsonify({"status": "error", "message": "Update logic currently unavailable."}), 503
-
+        
     provided_key = request.headers.get('X-Update-Secret')
     expected_key = APIConfig.UPDATE_SECRET_KEY
     if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
         return jsonify({"status": "error", "message": "Unauthorized."}), 403
-
-    year_to_process = 2024
-    logger.info(f"Triggering historical backfill for year {year_to_process}...")
-    threading.Thread(target=run_historical_backfill, args=(year_to_process,), daemon=True).start()
-    return jsonify({"status": "success", "message": f"Historical backfill for {year_to_process} triggered."}), 202
+    
+    threading.Thread(target=run_database_update, args=(15,), daemon=True).start()
+    return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
 
 @app.errorhandler(404)
 def not_found_error_handler(error):
