@@ -172,7 +172,7 @@ def trigger_update():
     # --- TEMPORARY CODE FOR BACKFILL ---
     # This calls the backfill function for the year 2024.
     # Change the year for each subsequent run.
-    year_to_process = 2019
+    year_to_process = 2018
     logger.info(f"Triggering historical backfill for year {year_to_process}...")
     threading.Thread(target=run_historical_backfill, args=(year_to_process,), daemon=True).start()
     return jsonify({"status": "success", "message": f"Historical backfill for {year_to_process} triggered."}), 202
