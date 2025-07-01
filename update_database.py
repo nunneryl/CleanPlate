@@ -54,7 +54,7 @@ def update_database_batch(data):
         dba = item.get("dba")
         normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
 
-        # This is the list of data we save for each inspection
+        # Add the 'action' field to the list of data being saved
         restaurants_to_insert.append((
             camis, dba, normalized_dba,
             item.get("boro"), item.get("building"), item.get("street"),
@@ -64,7 +64,7 @@ def update_database_batch(data):
             item.get("grade"), inspection_date, item.get("critical_flag"),
             item.get("inspection_type"), item.get("cuisine_description"),
             convert_date(item.get("grade_date")),
-            item.get("action") # <-- ADDED: Read the 'action' field from the API data
+            item.get("action")  # <-- NEW: Read the 'action' field from the API data
         ))
         
         if item.get("violation_code"):
@@ -80,7 +80,8 @@ def update_database_batch(data):
             if restaurants_to_insert:
                 unique_restaurants = list({(r[0], r[11]): r for r in restaurants_to_insert}.values())
                 logger.info(f"Executing batch insert for {len(unique_restaurants)} unique restaurant inspections...")
-                # --- MODIFIED SQL a little bit ---
+                
+                # --- MODIFIED SQL to include the 'action' column ---
                 upsert_sql = """
                     INSERT INTO restaurants (
                         camis, dba, dba_normalized_search, boro, building, street, zipcode, phone,
@@ -93,6 +94,7 @@ def update_database_batch(data):
                         action = EXCLUDED.action;
                 """
                 # --- END MODIFIED SQL ---
+
                 cursor.executemany(upsert_sql, unique_restaurants)
                 r_count = cursor.rowcount
                 logger.info(f"Restaurant insert command executed. Affected rows: {r_count}")
