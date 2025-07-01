@@ -1,4 +1,5 @@
-# FINAL update_database.py
+# FINAL CLEANED update_database.py
+
 import os
 import logging
 import argparse
@@ -26,17 +27,17 @@ def convert_date(date_str):
     except (ValueError, TypeError):
         return None
 
-def fetch_data_for_range(start_date, end_date):
-    logger.info(f"--> Fetching data from NYC API for range: {start_date} to {end_date}...")
-    query = f"https://data.cityofnewyork.us/resource/43nn-pn8j.json?$where=inspection_date >= '{start_date}T00:00:00.000' AND inspection_date <= '{end_date}T23:59:59.000'&$limit=500000"
+def fetch_data(days_back=15):
+    logger.info(f"Fetching data from NYC API for past {days_back} days...")
+    query = f"https://data.cityofnewyork.us/resource/43nn-pn8j.json?$where=inspection_date >= '{(datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')}T00:00:00.000'&$limit=50000"
     try:
-        response = requests.get(query, timeout=300)
+        response = requests.get(query, timeout=90)
         response.raise_for_status()
         data = response.json()
-        logger.info(f"--> Successfully fetched {len(data)} records for this range.")
+        logger.info(f"Total records fetched: {len(data)}")
         return data
-    except Exception as e:
-        logger.error(f"--> API fetch error for range {start_date}-{end_date}: {e}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API fetch error: {e}")
         return []
 
 def update_database_batch(data):
@@ -96,25 +97,14 @@ def update_database_batch(data):
 
 def run_database_update(days_back=15):
     logger.info(f"Starting DB update (days_back={days_back})")
-    query_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
-    query = f"https://data.cityofnewyork.us/resource/43nn-pn8j.json?$where=inspection_date >= '{query_date}T00:00:00.000'&$limit=50000"
-    try:
-        response = requests.get(query, timeout=90)
-        data = response.json()
-        logger.info(f"Total records fetched: {len(data)}")
-        if data:
-            update_database_batch(data)
-    except Exception as e:
-        logger.error(f"Daily update failed during fetch: {e}")
-
-def run_historical_backfill(year):
-    start_date = f"{year}-01-01"
-    end_date = f"{year}-12-31"
-    logger.info(f"--- Starting HISTORICAL BACKFILL for year: {year} ---")
-    data = fetch_data_for_range(start_date, end_date)
+    data = fetch_data(days_back)
     if data:
-        update_database_batch(data)
-    logger.info(f"--- FINISHED BACKFILL for year: {year} ---")
+        r_upd, v_ins = update_database_batch(data)
+        logger.info(f"Update complete. Restaurants processed: {r_upd}, Violations: {v_ins}")
+    else:
+        logger.warning("No data from API.")
+    logger.info("DB update finished.")
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Update restaurant inspection database.")
