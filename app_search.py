@@ -166,7 +166,7 @@ def trigger_update():
     expected_key = APIConfig.UPDATE_SECRET_KEY
     if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
         return jsonify({"status": "error", "message": "Unauthorized."}), 403
-    threading.Thread(target=run_database_update, args=(30,), daemon=True).start()
+    threading.Thread(target=run_database_update, args=(3653,), daemon=True).start()
     return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
 
 @app.errorhandler(404)
