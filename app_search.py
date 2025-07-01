@@ -170,7 +170,7 @@ def trigger_update():
     if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
         return jsonify({"status": "error", "message": "Unauthorized."}), 403
 
-    year_to_process = 2016
+    year_to_process = 2015
     logger.info(f"Triggering historical backfill for year {year_to_process}...")
     threading.Thread(target=run_historical_backfill, args=(year_to_process,), daemon=True).start()
     return jsonify({"status": "success", "message": f"Historical backfill for {year_to_process} triggered."}), 202
