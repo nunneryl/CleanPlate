@@ -1,7 +1,6 @@
+# FINAL app_search.py
 import os
-import re
 import logging
-import json
 import threading
 import secrets
 from utils import normalize_search_term_for_hybrid
@@ -134,14 +133,16 @@ def search():
         for row in rows_for_restaurant:
             insp_date_str = row['inspection_date'].isoformat()
             if insp_date_str not in inspections:
+                # --- THIS IS THE CORRECTED BLOCK ---
                 inspections[insp_date_str] = {
                     'inspection_date': insp_date_str,
                     'grade': row.get('grade'),
                     'critical_flag': row.get('critical_flag'),
                     'inspection_type': row.get('inspection_type'),
-                    'action': row.get('action'),  # <-- This is the important new field
+                    'action': row.get('action'),  # <-- Ensure 'action' field is added here
                     'violations': []
                 }
+                # -----------------------------------
             if row.get('violation_code'):
                 v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
                 if v_data not in inspections[insp_date_str]['violations']:
@@ -149,7 +150,7 @@ def search():
 
         base_info['inspections'] = sorted(list(inspections.values()), key=lambda x: x['inspection_date'], reverse=True)
         
-        # Pop all inspection-level keys from the top-level restaurant object
+        # This loop now correctly removes all inspection-level data from the top-level object
         for key in ['violation_code', 'violation_description', 'grade', 'inspection_date', 'critical_flag', 'inspection_type', 'action']:
             base_info.pop(key, None)
             
@@ -157,7 +158,7 @@ def search():
         
     return jsonify(final_results)
 
-# This endpoint is now restored to its normal daily operation state
+# This endpoint should be in its normal state for daily operation
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
     try:
