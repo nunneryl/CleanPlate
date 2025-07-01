@@ -156,20 +156,34 @@ def search():
 
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
-    # Import locally to avoid circular dependency at startup
     try:
-        from update_database import run_database_update
-    except ImportError:
+        # Import the correct function based on our needs
+        # For now, we are testing the backfill
+        from update_database import run_historical_backfill
+    except ImportError as e:
+        logger.error(f"Import Error in trigger_update: {e}")
         return jsonify({"status": "error", "message": "Update logic currently unavailable."}), 503
         
     provided_key = request.headers.get('X-Update-Secret')
     expected_key = APIConfig.UPDATE_SECRET_KEY
     if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
         return jsonify({"status": "error", "message": "Unauthorized."}), 403
-        
-    # We are calling the new function for the year 2024
-    threading.Thread(target=run_historical_backfill, args=(2024,), daemon=True).start()
-    return jsonify({"status": "success", "message": "Historical backfill for 2024 triggered."}), 202
+    
+    # --- TEMPORARY CODE FOR BACKFILL ---
+    # This calls the backfill function for the year 2024.
+    # Change the year for each subsequent run.
+    year_to_process = 2024
+    logger.info(f"Triggering historical backfill for year {year_to_process}...")
+    threading.Thread(target=run_historical_backfill, args=(year_to_process,), daemon=True).start()
+    return jsonify({"status": "success", "message": f"Historical backfill for {year_to_process} triggered."}), 202
+    # --- END TEMPORARY CODE ---
+
+    # --- NORMAL OPERATION CODE (commented out for now) ---
+    # from update_database import run_database_update
+    # logger.info("Triggering standard 15-day database update...")
+    # threading.Thread(target=run_database_update, args=(15,), daemon=True).start()
+    # return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
+    # ---------------------------------------------
 
 @app.errorhandler(404)
 def not_found_error_handler(error):
