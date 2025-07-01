@@ -1,4 +1,3 @@
-# update_database.py (Corrected Indentation)
 import os
 import logging
 import argparse
@@ -26,11 +25,26 @@ def convert_date(date_str):
     except (ValueError, TypeError):
         return None
 
+def fetch_data(days_back=15):
+    logger.info(f"Fetching data from NYC API for past {days_back} days...")
+    query = f"https://data.cityofnewyork.us/resource/43nn-pn8j.json?$where=inspection_date >= '{(datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')}T00:00:00.000'&$limit=50000"
+    try:
+        response = requests.get(query, timeout=90)
+        response.raise_for_status()
+        data = response.json()
+        logger.info(f"Total records fetched: {len(data)}")
+        return data
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API fetch error: {e}")
+        return []
+
 def update_database_batch(data):
     if not data: return 0, 0
-    restaurants_to_insert, violations_to_insert = [], []
+    restaurants_to_insert = []
+    violations_to_insert = []
     for item in data:
-        camis, inspection_date = item.get("camis"), convert_date(item.get("inspection_date"))
+        camis = item.get("camis")
+        inspection_date = convert_date(item.get("inspection_date"))
         if not (camis and inspection_date): continue
         restaurants_to_insert.append((
             camis, item.get("dba"), normalize_search_term_for_hybrid(item.get("dba")),
@@ -43,7 +57,8 @@ def update_database_batch(data):
         ))
         if item.get("violation_code"):
              violations_to_insert.append((camis, inspection_date, item.get("violation_code"), item.get("violation_description")))
-    conn, r_count, v_count = None, 0, 0
+    conn = None
+    r_count, v_count = 0, 0
     try:
         conn = DatabaseManager.get_connection()
         conn.autocommit = False
@@ -51,7 +66,13 @@ def update_database_batch(data):
             if restaurants_to_insert:
                 unique_restaurants = list({(r[0], r[11]): r for r in restaurants_to_insert}.values())
                 logger.info(f"Executing batch insert for {len(unique_restaurants)} unique restaurant inspections...")
-                upsert_sql = """INSERT INTO restaurants (camis, dba, dba_normalized_search, boro, building, street, zipcode, phone, latitude, longitude, grade, inspection_date, critical_flag, inspection_type, cuisine_description, grade_date, action) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (camis, inspection_date) DO UPDATE SET dba = EXCLUDED.dba, dba_normalized_search = EXCLUDED.dba_normalized_search, boro = EXCLUDED.boro, grade = EXCLUDED.grade, action = EXCLUDED.action;"""
+                upsert_sql = """
+                    INSERT INTO restaurants (camis, dba, dba_normalized_search, boro, building, street, zipcode, phone, latitude, longitude, grade, inspection_date, critical_flag, inspection_type, cuisine_description, grade_date, action)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (camis, inspection_date) DO UPDATE SET
+                        dba = EXCLUDED.dba, dba_normalized_search = EXCLUDED.dba_normalized_search,
+                        boro = EXCLUDED.boro, grade = EXCLUDED.grade, action = EXCLUDED.action;
+                """
                 cursor.executemany(upsert_sql, unique_restaurants)
                 r_count = cursor.rowcount
                 logger.info(f"Restaurant insert command executed. Affected rows: {r_count}")
@@ -74,42 +95,18 @@ def update_database_batch(data):
 
 def run_database_update(days_back=15):
     logger.info(f"Starting DB update (days_back={days_back})")
-    query = f"https://data.cityofnewyork.us/resource/43nn-pn8j.json?$where=inspection_date >= '{(datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')}T00:00:00.000'&$limit=50000"
-    try:
-        response = requests.get(query, timeout=90)
-        response.raise_for_status()
-        data = response.json()
-        logger.info(f"Total records fetched: {len(data)}")
-        if data:
-            update_database_batch(data)
-    except Exception as e:
-        logger.error(f"Daily update failed: {e}")
-
-def run_historical_backfill(year):
-    # --- THIS BLOCK IS NOW CORRECTLY INDENTED ---
-    start_date = f"{year}-01-01"
-    end_date = f"{year}-12-31"
-    logger.info(f"--- Starting HISTORICAL BACKFILL for year: {year} ---")
-    
-    query = f"https://data.cityofnewyork.us/resource/43nn-pn8j.json?$where=inspection_date >= '{start_date}T00:00:00.000' AND inspection_date <= '{end_date}T23:59:59.000'&$limit=500000"
-    
-    try:
-        response = requests.get(query, timeout=300)
-        response.raise_for_status()
-        data = response.json()
-        logger.info(f"Total records fetched for {year}: {len(data)}")
-        if data:
-            update_database_batch(data)
-        else:
-            logger.warning(f"No data returned from API for {year}.")
-    except Exception as e:
-        logger.error(f"Backfill for year {year} failed: {e}")
-    logger.info(f"--- FINISHED BACKFILL for year: {year} ---")
+    DatabaseManager.initialize_pool()
+    data = fetch_data(days_back)
+    if data:
+        r_upd, v_ins = update_database_batch(data)
+        logger.info(f"Update complete. Restaurants processed: {r_upd}, Violations: {v_ins}")
+    else:
+        logger.warning("No data from API.")
+    DatabaseManager.close_all_connections()
+    logger.info("DB update finished.")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Update restaurant inspection database.")
     parser.add_argument("--days", type=int, default=15, help="Number of past days to fetch data for.")
     args = parser.parse_args()
-    DatabaseManager.initialize_pool()
     run_database_update(days_back=args.days)
-    DatabaseManager.close_all_connections()
