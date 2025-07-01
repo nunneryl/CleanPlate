@@ -129,6 +129,29 @@ def run_database_update(days_back=15):
         logger.warning("No data from API.")
     logger.info("DB update finished.")
 
+# --- NEW FUNCTION FOR HISTORICAL BACKFILL ---
+def run_historical_backfill(year):
+    start_date = f"{year}-01-01"
+    end_date = f"{year}-12-31"
+    logger.info(f"--- Starting HISTORICAL BACKFILL for year: {year} ---")
+
+    query = f"https://data.cityofnewyork.us/resource/43nn-pn8j.json?$where=inspection_date >= '{start_date}T00:00:00.000' AND inspection_date <= '{end_date}T23:59:59.000'&$limit=500000"
+
+    try:
+        response = requests.get(query, timeout=300)
+        response.raise_for_status()
+        data = response.json()
+        logger.info(f"Total records fetched for {year}: {len(data)}")
+        if data:
+            update_database_batch(data)
+        else:
+            logger.warning(f"No data returned from API for {year}.")
+    except Exception as e:
+        logger.error(f"Backfill for year {year} failed: {e}")
+
+    logger.info(f"--- FINISHED BACKFILL for year: {year} ---")
+# ---------------------------------------------
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Update restaurant inspection database.")
