@@ -9,34 +9,49 @@ on:
 jobs:
   deploy_preview:
     runs-on: ubuntu-latest
+    outputs:
+      # This makes the environment name available to other jobs
+      env_name: ${{ steps.create_env.outputs.env_name }}
     steps:
       - uses: actions/checkout@v3
 
-      # This action (which you found in your research) creates or removes the preview environment
+      # This is the corrected action step
       - name: Deploy or Remove Preview Environment
+        id: create_env
         uses: ayungavis/railway-preview-deploy@v1.0.2
         with:
           railway_api_token: ${{ secrets.RAILWAY_TOKEN }}
-          pull_request_id: ${{ github.event.pull_request.number }}
+          project_id: ${{ secrets.RAILWAY_PROJECT_ID }} # <-- ADDED required project ID
 
   clone_and_migrate_db:
-    # This job only runs if the PR was opened or updated, not closed
+    # This job only runs if the PR was opened or updated
     if: github.event.action != 'closed'
-    # It waits for the deployment job to finish
+    # It waits for the deployment job to finish and uses its output
     needs: deploy_preview
     runs-on: ubuntu-latest
     steps:
-      - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Install Railway CLI and PostgreSQL client
+        run: |
+          npm i -g @railway/cli
+          sudo apt-get update && sudo apt-get install -y postgresql-client jq
 
       - name: Get Preview Database URL
         id: get_db_url
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        # This script finds the preview environment and gets the new DB's connection URL
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          PREVIEW_ENV_NAME: ${{ needs.deploy_preview.outputs.env_name }}
         run: |
-          PREVIEW_ENV_NAME="pr-${{ github.event.pull_request.number }}"
-          DB_URL=$(railway variables -e $PREVIEW_ENV_NAME -s Postgres --json | jq -r .DATABASE_URL)
+          echo "Looking for DB in environment: $PREVIEW_ENV_NAME"
+          # Get the ID of the Postgres service in the preview environment
+          DB_SERVICE_ID=$(railway services -e $PREVIEW_ENV_NAME --json | jq -r '.[] | select(.name | test("Postgres"; "i")) | .id')
+          if [ -z "$DB_SERVICE_ID" ]; then
+            echo "::error::Could not find Postgres service in environment $PREVIEW_ENV_NAME"
+            exit 1
+          fi
+          echo "Found DB Service ID: $DB_SERVICE_ID"
+          # Get the DATABASE_URL for that specific service
+          DB_URL=$(railway variables -e $PREVIEW_ENV_NAME -s $DB_SERVICE_ID --json | jq -r .DATABASE_URL)
           echo "DATABASE_URL=$DB_URL" >> $GITHUB_ENV
 
       - name: Install DB Extensions
@@ -52,5 +67,5 @@ jobs:
           PREVIEW_DATABASE_URL: ${{ env.DATABASE_URL }}
         run: |
           echo "Cloning production data to preview database..."
-          pg_dump "$PROD_DATABASE_URL" | grep -v 'transaction_timeout' | psql "$PREVIEW_DATABASE_URL"
+          pg_dump --clean --if-exists "$PROD_DATABASE_URL" | grep -v 'transaction_timeout' | psql "$PREVIEW_DATABASE_URL"
           echo "Clone complete."
