@@ -14,7 +14,7 @@ jobs:
 
       # This action (which you found in your research) creates or removes the preview environment
       - name: Deploy or Remove Preview Environment
-        uses: ayungavis/railway-preview-deploy@v1
+        uses: ayungavis/railway-preview-deploy@v1.0.2
         with:
           railway_api_token: ${{ secrets.RAILWAY_TOKEN }}
           pull_request_id: ${{ github.event.pull_request.number }}
