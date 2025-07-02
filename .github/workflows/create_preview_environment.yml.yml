@@ -1,0 +1,56 @@
+# In .github/workflows/create_preview_environment.yml
+
+name: Create Railway Preview Environment
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+jobs:
+  deploy_preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      # This action (which you found in your research) creates or removes the preview environment
+      - name: Deploy or Remove Preview Environment
+        uses: ayungavis/railway-preview-deploy@v1.9.2
+        with:
+          railway_api_token: ${{ secrets.RAILWAY_TOKEN }}
+          pull_request_id: ${{ github.event.pull_request.number }}
+
+  clone_and_migrate_db:
+    # This job only runs if the PR was opened or updated, not closed
+    if: github.event.action != 'closed'
+    # It waits for the deployment job to finish
+    needs: deploy_preview
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Get Preview Database URL
+        id: get_db_url
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        # This script finds the preview environment and gets the new DB's connection URL
+        run: |
+          PREVIEW_ENV_NAME="pr-${{ github.event.pull_request.number }}"
+          DB_URL=$(railway variables -e $PREVIEW_ENV_NAME -s Postgres --json | jq -r .DATABASE_URL)
+          echo "DATABASE_URL=$DB_URL" >> $GITHUB_ENV
+
+      - name: Install DB Extensions
+        env:
+          PREVIEW_DATABASE_URL: ${{ env.DATABASE_URL }}
+        run: |
+          psql "$PREVIEW_DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+          psql "$PREVIEW_DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS unaccent;"
+
+      - name: Clone Production Data
+        env:
+          PROD_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          PREVIEW_DATABASE_URL: ${{ env.DATABASE_URL }}
+        run: |
+          echo "Cloning production data to preview database..."
+          pg_dump "$PROD_DATABASE_URL" | grep -v 'transaction_timeout' | psql "$PREVIEW_DATABASE_URL"
+          echo "Clone complete."
