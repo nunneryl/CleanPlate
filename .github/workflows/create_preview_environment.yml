@@ -21,7 +21,8 @@ jobs:
         uses: ayungavis/railway-preview-deploy@v1.0.2
         with:
           railway_api_token: ${{ secrets.RAILWAY_TOKEN }}
-          project_id: ${{ secrets.RAILWAY_PROJECT_ID }} # <-- ADDED required project ID
+          project_id: ${{ secrets.RAILWAY_PROJECT_ID }}
+          environment_name: 'production'
 
   clone_and_migrate_db:
     # This job only runs if the PR was opened or updated
