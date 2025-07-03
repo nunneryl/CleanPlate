@@ -1,5 +1,5 @@
 flask==2.2.5
-werkzeug==2.0.3
+werkzeug==3.0.6
 flask-cors==6.0.0
 psycopg[binary]>=3.1.0
 psycopg_pool
