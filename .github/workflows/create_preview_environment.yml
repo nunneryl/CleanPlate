@@ -33,19 +33,13 @@ jobs:
           npm i -g @railway/cli
           sudo apt-get update && sudo apt-get install -y postgresql-client jq
 
-      # --- ADD THIS NEW DEBUGGING STEP ---
-      - name: Debug Railway Token
+      # --- THIS IS THE NEW FIX ---
+      - name: Authenticate with Railway CLI
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          TOKEN_LENGTH=${#RAILWAY_TOKEN}
-          echo "The length of the provided RAILWAY_TOKEN secret is: $TOKEN_LENGTH"
-          if [ "$TOKEN_LENGTH" -lt 10 ]; then
-            echo "::error::The RAILWAY_TOKEN secret is either missing or empty."
-          else
-            echo "The RAILWAY_TOKEN secret appears to be set."
-          fi
-      # ------------------------------------
+        run: railway login --no-browser
+      # ---------------------------
+      
       - name: Get Preview Database URL
         id: get_db_url
         env:
