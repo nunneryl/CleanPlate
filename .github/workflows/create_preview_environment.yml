@@ -37,7 +37,7 @@ jobs:
       - name: Authenticate with Railway CLI
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: railway login --no-browser
+        run: railway login --browserless
       # ---------------------------
       
       - name: Get Preview Database URL
