@@ -9,69 +9,13 @@ on:
 jobs:
   deploy_preview:
     runs-on: ubuntu-latest
-    outputs:
-      env_name: pr-${{ github.event.pull_request.number }}
     steps:
       - uses: actions/checkout@v3
 
       - name: Deploy or Remove Preview Environment
-        id: create_env
         uses: ayungavis/railway-preview-deploy@v1.0.2
         with:
           railway_api_token: ${{ secrets.RAILWAY_TOKEN }}
           project_id: ${{ secrets.RAILWAY_PROJECT_ID }}
           environment_name: 'production'
-          preview_environment_name: pr-${{ github.event.pull_request.number }} # <-- THIS IS THE FIX
-
-  clone_and_migrate_db:
-    if: github.event.action != 'closed'
-    needs: deploy_preview
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install Railway CLI and PostgreSQL client
-        run: |
-          npm i -g @railway/cli
-          sudo apt-get update && sudo apt-get install -y postgresql-client jq
-
-      # --- THIS IS THE NEW FIX ---
-      - name: Authenticate with Railway CLI
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: railway login --browserless
-      # ---------------------------
-      
-      - name: Get Preview Database URL
-        id: get_db_url
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
-          PREVIEW_ENV_NAME: ${{ needs.deploy_preview.outputs.env_name }}
-        run: |
-          echo "Looking for DB in environment: $PREVIEW_ENV_NAME"
-          DB_URL=$(railway variables -e $PREVIEW_ENV_NAME --json | jq -r .DATABASE_URL)
-          if [ -z "$DB_URL" ]; then
-            echo "::error::Could not find DATABASE_URL in environment $PREVIEW_ENV_NAME. It may still be provisioning."
-            sleep 15
-            DB_URL=$(railway variables -e $PREVIEW_ENV_NAME --json | jq -r .DATABASE_URL)
-          fi
-          if [ -z "$DB_URL" ]; then
-            echo "::error::DATABASE_URL still not found after waiting."
-            exit 1
-          fi
-          echo "DATABASE_URL=$DB_URL" >> $GITHUB_ENV
-
-      - name: Install DB Extensions
-        env:
-          PREVIEW_DATABASE_URL: ${{ env.DATABASE_URL }}
-        run: |
-          psql "$PREVIEW_DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
-          psql "$PREVIEW_DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS unaccent;"
-
-      - name: Clone Production Data
-        env:
-          PROD_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
-          PREVIEW_DATABASE_URL: ${{ env.DATABASE_URL }}
-        run: |
-          echo "Cloning production data to preview database..."
-          pg_dump --clean --if-exists "$PROD_DATABASE_URL" | grep -v 'transaction_timeout' | psql "$PREVIEW_DATABASE_URL"
-          echo "Clone complete."
+          preview_environment_name: pr-${{ github.event.pull_request.number }}
