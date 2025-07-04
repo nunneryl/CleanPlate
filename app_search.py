@@ -156,7 +156,7 @@ def search():
         
     return jsonify(final_results)
     
-    @app.route('/lists/recently-graded', methods=['GET'])
+@app.route('/lists/recently-graded', methods=['GET'])
 def get_recently_graded():
     """
     Returns a list of up to 20 restaurants that have most recently received an 'A', 'B', or 'C' grade.
