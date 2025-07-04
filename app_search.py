@@ -155,6 +155,107 @@ def search():
         final_results.append(base_info)
         
     return jsonify(final_results)
+    
+    @app.route('/lists/recently-graded', methods=['GET'])
+def get_recently_graded():
+    """
+    Returns a list of up to 20 restaurants that have most recently received an 'A', 'B', or 'C' grade.
+    The data structure for each restaurant is identical to the /search endpoint.
+    """
+    logger.info("Request received for /lists/recently-graded")
+    
+    # --- Step 1: Find the unique CAMIS of the 20 most recently graded restaurants ---
+    # This query first finds the single most recent graded inspection for every restaurant,
+    # then sorts that list by the grade date to find the top 20 most recent overall.
+    id_fetch_query = """
+        SELECT camis FROM (
+            SELECT DISTINCT ON (camis) camis, grade_date
+            FROM restaurants
+            WHERE grade IN ('A', 'B', 'C') AND grade_date IS NOT NULL
+            ORDER BY camis, grade_date DESC
+        ) AS latest_graded_restaurants
+        ORDER BY grade_date DESC
+        LIMIT 20;
+    """
+    
+    try:
+        with DatabaseConnection() as conn:
+            conn.row_factory = dict_row
+
+            with conn.cursor() as cursor:
+                logger.info("Executing query to find recently graded CAMIS.")
+                cursor.execute(id_fetch_query)
+                recently_graded_camis_tuples = cursor.fetchall()
+
+            if not recently_graded_camis_tuples:
+                logger.info("No recently graded restaurants found.")
+                return jsonify([])
+
+            # Extract the CAMIS values from the query result
+            top_camis_list = [item['camis'] for item in recently_graded_camis_tuples]
+            
+            # --- Step 2: Fetch the complete data for these specific restaurants ---
+            # This query and the subsequent data shaping logic is modeled directly on
+            # your existing /search endpoint to ensure frontend compatibility.
+            details_query = """
+                SELECT r.*, v.violation_code, v.violation_description
+                FROM restaurants r
+                LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
+                WHERE r.camis = ANY(%s)
+            """
+            with conn.cursor() as details_cursor:
+                logger.info(f"Fetching full details for {len(top_camis_list)} CAMIS.")
+                details_cursor.execute(details_query, (top_camis_list,))
+                all_rows = details_cursor.fetchall()
+
+    except Exception as e:
+        logger.error(f"DB query failed for recently-graded list: {e}", exc_info=True)
+        return jsonify({"error": "Database query failed"}), 500
+
+    # --- Step 3: Shape the JSON response (reusing logic from the /search endpoint) ---
+    restaurant_details_map = {str(camis): [] for camis in top_camis_list}
+    for row in all_rows:
+        restaurant_details_map[str(row['camis'])].append(row)
+
+    final_results = []
+    # We iterate through top_camis_list to preserve the "most recent" order from the first query
+    for camis in top_camis_list:
+        camis_str = str(camis)
+        rows_for_restaurant = restaurant_details_map.get(camis_str)
+        if not rows_for_restaurant:
+            continue
+        
+        # This logic correctly groups all inspections and violations for one restaurant
+        base_info = dict(rows_for_restaurant[0])
+        inspections = {}
+        for row in rows_for_restaurant:
+            insp_date_str = row['inspection_date'].isoformat()
+            if insp_date_str not in inspections:
+                inspections[insp_date_str] = {
+                    'inspection_date': insp_date_str,
+                    'grade': row['grade'],
+                    'grade_date': row['grade_date'].isoformat() if row.get('grade_date') else None,
+                    'action': row.get('action'),
+                    'critical_flag': row['critical_flag'],
+                    'inspection_type': row['inspection_type'],
+                    'violations': []
+                }
+            if row.get('violation_code'):
+                v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
+                if v_data not in inspections[insp_date_str]['violations']:
+                    inspections[insp_date_str]['violations'].append(v_data)
+
+        base_info['inspections'] = sorted(list(inspections.values()), key=lambda x: x['inspection_date'], reverse=True)
+        
+        # Clean up the top-level object to remove redundant fields
+        for key in ['violation_code', 'violation_description', 'grade', 'grade_date', 'action', 'inspection_date', 'critical_flag', 'inspection_type']:
+            base_info.pop(key, None)
+            
+        final_results.append(base_info)
+        
+    logger.info(f"Successfully assembled data for {len(final_results)} restaurants.")
+    return jsonify(final_results)
+
 
 # This endpoint is now restored to its normal daily operation state
 @app.route('/trigger-update', methods=['POST'])
