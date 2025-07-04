@@ -178,6 +178,7 @@ def get_recently_graded():
         LIMIT 20;
     """
     
+    
     try:
         with DatabaseConnection() as conn:
             conn.row_factory = dict_row
