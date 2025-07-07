@@ -164,27 +164,29 @@ def get_recently_graded():
     """
     logger.info("Request received for /lists/recently-graded")
     
-    # Use 'limit' from the request, but default to 100.
-    # The home screen will request 20, the "See All" screen will get the default 100.
     limit = int(request.args.get('limit', 100, type=int))
     
+    # --- THIS QUERY CONTAINS THE FINAL FIX ---
     id_fetch_query = """
         SELECT camis FROM (
-            SELECT DISTINCT ON (camis) camis, grade_date
+            SELECT DISTINCT ON (camis) camis, dba, grade_date
             FROM restaurants
             WHERE grade IN ('A', 'B', 'C') AND grade_date IS NOT NULL
             ORDER BY camis, grade_date DESC
         ) AS latest_graded_restaurants
-        ORDER BY grade_date DESC
+        ORDER BY
+            grade_date DESC, -- Primary Sort: By date (the tie)
+            dba ASC;          -- Secondary Sort: By name (the tie-breaker)
         LIMIT %s;
     """
+    # --- END OF FIX ---
     
     try:
         with DatabaseConnection() as conn:
             conn.row_factory = dict_row
             with conn.cursor() as cursor:
                 logger.info(f"Executing query for recently graded CAMIS with limit={limit}.")
-                cursor.execute(id_fetch_query, (limit,)) # Only pass the limit
+                cursor.execute(id_fetch_query, (limit,))
                 recently_graded_camis_tuples = cursor.fetchall()
 
             if not recently_graded_camis_tuples:
@@ -212,6 +214,7 @@ def get_recently_graded():
     for row in all_rows:
         restaurant_details_map[str(row['camis'])].append(row)
     final_results = []
+    # IMPORTANT: We now must iterate through top_camis_list to preserve the sort order
     for camis in top_camis_list:
         camis_str = str(camis)
         rows_for_restaurant = restaurant_details_map.get(camis_str)
