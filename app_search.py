@@ -192,12 +192,12 @@ def get_recently_graded():
 
             top_camis_list = [item['camis'] for item in recently_graded_camis_tuples]
             
-            # The rest of the function remains the same, fetching details for the CAMIS list.
             details_query = """
                 SELECT r.*, v.violation_code, v.violation_description
                 FROM restaurants r
                 LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
                 WHERE r.camis = ANY(%s)
+                ORDER BY r.camis, r.inspection_date DESC;
             """
             with conn.cursor() as details_cursor:
                 details_cursor.execute(details_query, (top_camis_list,))
