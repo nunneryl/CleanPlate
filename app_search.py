@@ -166,20 +166,23 @@ def get_recently_graded():
     
     limit = int(request.args.get('limit', 100, type=int))
     
-    # --- THIS QUERY CONTAINS THE FINAL FIX ---
+    # --- THIS IS THE DEFINITIVELY CORRECTED QUERY ---
+    # It uses a Common Table Expression (CTE) for clarity and selects the columns
+    # needed for sorting in the final step.
     id_fetch_query = """
-        SELECT camis FROM (
+        WITH latest_graded_per_restaurant AS (
             SELECT DISTINCT ON (camis) camis, dba, grade_date
             FROM restaurants
             WHERE grade IN ('A', 'B', 'C') AND grade_date IS NOT NULL
             ORDER BY camis, grade_date DESC
-        ) AS latest_graded_restaurants
+        )
+        SELECT camis, dba, grade_date
+        FROM latest_graded_per_restaurant
         ORDER BY
-            grade_date DESC, -- Primary Sort: By date (the tie)
-            dba ASC;          -- Secondary Sort: By name (the tie-breaker)
+            grade_date DESC, -- Primary Sort: By date
+            dba ASC          -- Secondary Sort (tie-breaker): By name
         LIMIT %s;
     """
-    # --- END OF FIX ---
     
     try:
         with DatabaseConnection() as conn:
@@ -187,12 +190,14 @@ def get_recently_graded():
             with conn.cursor() as cursor:
                 logger.info(f"Executing query for recently graded CAMIS with limit={limit}.")
                 cursor.execute(id_fetch_query, (limit,))
-                recently_graded_camis_tuples = cursor.fetchall()
+                # This will now be a list of dictionaries, each with 'camis', 'dba', 'grade_date'
+                recently_graded_tuples = cursor.fetchall()
 
-            if not recently_graded_camis_tuples:
+            if not recently_graded_tuples:
                 return jsonify([])
 
-            top_camis_list = [item['camis'] for item in recently_graded_camis_tuples]
+            # The Python code will correctly extract just the 'camis' from each dictionary
+            top_camis_list = [item['camis'] for item in recently_graded_tuples]
             
             details_query = """
                 SELECT r.*, v.violation_code, v.violation_description
@@ -209,12 +214,11 @@ def get_recently_graded():
         logger.error(f"DB query failed for recently-graded list: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
-    # The JSON shaping logic is unchanged.
+    # The JSON shaping logic is unchanged and remains correct.
     restaurant_details_map = {str(camis): [] for camis in top_camis_list}
     for row in all_rows:
         restaurant_details_map[str(row['camis'])].append(row)
     final_results = []
-    # IMPORTANT: We now must iterate through top_camis_list to preserve the sort order
     for camis in top_camis_list:
         camis_str = str(camis)
         rows_for_restaurant = restaurant_details_map.get(camis_str)
