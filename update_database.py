@@ -40,58 +40,92 @@ def fetch_data(days_back=15):
 
 def update_database_batch(data):
     if not data: return 0, 0
-    restaurants_to_insert = []
-    violations_to_insert = []
+    
+    # This will group all violations by their inspection (camis, inspection_date)
+    inspections_data = {}
     for item in data:
         camis = item.get("camis")
         inspection_date = convert_date(item.get("inspection_date"))
         if not (camis and inspection_date): continue
+        
+        inspection_key = (camis, inspection_date)
+        if inspection_key not in inspections_data:
+            # This is the first time we've seen this inspection, store its main details
+            inspections_data[inspection_key] = {
+                "details": item,
+                "violations": []
+            }
+        
+        # Add every violation to the list for this inspection
+        if item.get("violation_code"):
+            inspections_data[inspection_key]["violations"].append(item)
+
+    restaurants_to_insert = []
+    violations_to_insert = []
+
+    for key, inspection in inspections_data.items():
+        camis, inspection_date = key
+        item = inspection["details"] # Main details from the first record we saw
+        
+        dba = item.get("dba")
+        normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
+        
+        # --- Secondary Bug Fix: Determine the true 'critical_flag' for the entire inspection ---
+        # The inspection is "Critical" if ANY of its violations are critical.
+        is_critical = any(v.get("critical_flag") == 'Critical' for v in inspection["violations"])
+        critical_flag_for_inspection = 'Critical' if is_critical else 'Not Critical'
+
         restaurants_to_insert.append((
-            camis, item.get("dba"), normalize_search_term_for_hybrid(item.get("dba")),
-            item.get("boro"), item.get("building"), item.get("street"), item.get("zipcode"), item.get("phone"),
+            camis, dba, normalized_dba,
+            item.get("boro"), item.get("building"), item.get("street"),
+            item.get("zipcode"), item.get("phone"),
             float(item.get("latitude")) if item.get("latitude") and item.get("latitude") not in ['N/A', ''] else None,
             float(item.get("longitude")) if item.get("longitude") and item.get("longitude") not in ['N/A', ''] else None,
-            item.get("grade"), inspection_date, item.get("critical_flag"),
+            item.get("grade"), inspection_date, critical_flag_for_inspection, # Use the corrected flag
             item.get("inspection_type"), item.get("cuisine_description"),
-            convert_date(item.get("grade_date")), item.get("action")
+            convert_date(item.get("grade_date"))
         ))
-        if item.get("violation_code"):
-             violations_to_insert.append((camis, inspection_date, item.get("violation_code"), item.get("violation_description")))
-    conn = None
+        
+        # Add all unique violations from this inspection
+        for v_item in inspection["violations"]:
+            violations_to_insert.append((camis, inspection_date, v_item.get("violation_code"), v_item.get("violation_description")))
+
     r_count, v_count = 0, 0
-    try:
-        conn = DatabaseManager.get_connection()
-        conn.autocommit = False
-        with conn.cursor() as cursor:
-            if restaurants_to_insert:
-                unique_restaurants = list({(r[0], r[11]): r for r in restaurants_to_insert}.values())
-                logger.info(f"Executing batch insert for {len(unique_restaurants)} unique restaurant inspections...")
-                upsert_sql = """
-                    INSERT INTO restaurants (camis, dba, dba_normalized_search, boro, building, street, zipcode, phone, latitude, longitude, grade, inspection_date, critical_flag, inspection_type, cuisine_description, grade_date, action)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (camis, inspection_date) DO UPDATE SET
-                        dba = EXCLUDED.dba, dba_normalized_search = EXCLUDED.dba_normalized_search,
-                        boro = EXCLUDED.boro, grade = EXCLUDED.grade, action = EXCLUDED.action;
-                """
-                cursor.executemany(upsert_sql, unique_restaurants)
-                r_count = cursor.rowcount
-                logger.info(f"Restaurant insert command executed. Affected rows: {r_count}")
-            if violations_to_insert:
-                unique_violations = list(set(violations_to_insert))
-                logger.info(f"Executing batch insert for {len(unique_violations)} unique violations...")
-                insert_sql = "INSERT INTO violations (camis, inspection_date, violation_code, violation_description) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING;"
-                cursor.executemany(insert_sql, unique_violations)
-                v_count = cursor.rowcount
-                logger.info(f"Violation insert command executed. Affected rows: {v_count}")
-        logger.info("Explicitly committing transaction...")
+    with DatabaseConnection() as conn, conn.cursor() as cursor:
+        if restaurants_to_insert:
+            # We no longer need to deduplicate here as our new logic handles it
+            logger.info(f"Executing batch insert for {len(restaurants_to_insert)} unique restaurant inspections...")
+            upsert_sql = """
+                INSERT INTO restaurants (
+                    camis, dba, dba_normalized_search, boro, building, street, zipcode, phone,
+                    latitude, longitude, grade, inspection_date, critical_flag,
+                    inspection_type, cuisine_description, grade_date
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON ON CONFLICT ON CONSTRAINT restaurants_pkey DO UPDATE SET
+                    dba = EXCLUDED.dba,
+                    dba_normalized_search = EXCLUDED.dba_normalized_search,
+                    boro = EXCLUDED.boro,
+                    grade = EXCLUDED.grade,
+                    critical_flag = EXCLUDED.critical_flag;
+            """
+            cursor.executemany(upsert_sql, restaurants_to_insert)
+            r_count = cursor.rowcount
+            logger.info(f"Restaurant insert executed. Affected rows: {r_count}")
+
+        if violations_to_insert:
+            unique_violations = list(set(violations_to_insert))
+            logger.info(f"Executing batch insert for {len(unique_violations)} unique violations...")
+            insert_sql = "INSERT INTO violations (camis, inspection_date, violation_code, violation_description) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING;"
+            cursor.executemany(insert_sql, unique_violations)
+            v_count = cursor.rowcount
+            logger.info(f"Violation insert executed. Affected rows: {v_count}")
+        
+        # --- THE CRITICAL FIX ---
+        # Explicitly commit the transaction to save all changes.
         conn.commit()
-        logger.info("Transaction committed successfully.")
-    except Exception as e:
-        logger.error(f"DATABASE TRANSACTION FAILED: {e}", exc_info=True)
-        if conn: conn.rollback()
-    finally:
-        if conn: DatabaseManager.return_connection(conn)
+        logger.info("DB transaction explicitly committed.")
+
     return r_count, v_count
+
 
 def run_database_update(days_back=15):
     logger.info(f"Starting DB update (days_back={days_back})")
