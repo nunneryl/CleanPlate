@@ -100,7 +100,7 @@ def update_database_batch(data):
                     camis, dba, dba_normalized_search, boro, building, street, zipcode, phone,
                     latitude, longitude, grade, inspection_date, critical_flag,
                     inspection_type, cuisine_description, grade_date
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (camis, inspection_date) DO UPDATE SET
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON ON CONFLICT ON CONSTRAINT restaurants_pkey DO UPDATE SET
                     dba = EXCLUDED.dba,
                     dba_normalized_search = EXCLUDED.dba_normalized_search,
                     boro = EXCLUDED.boro,
