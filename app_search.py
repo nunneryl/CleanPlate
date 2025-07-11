@@ -75,14 +75,12 @@ def _group_and_shape_results(all_rows, ordered_camis):
 @app.route('/search', methods=['GET'])
 def search():
     search_term = request.args.get('name', '').strip()
-    # ... (filter and sort arguments remain the same)
     grade_filter = request.args.get('grade', type=str)
     boro_filter = request.args.get('boro', type=str)
     cuisine_filter = request.args.get('cuisine', type=str)
     sort_option = request.args.get('sort', type=str)
     page = int(request.args.get('page', 1, type=int))
     per_page = int(request.args.get('per_page', 25, type=int))
-
 
     if not search_term:
         return jsonify([])
@@ -118,19 +116,12 @@ def search():
         order_by_clause = "ORDER BY CASE WHEN dba_normalized_search = %s THEN 0 WHEN dba_normalized_search ILIKE %s THEN 1 ELSE 2 END, similarity(dba_normalized_search, %s) DESC, length(dba_normalized_search)"
         order_by_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
-    id_fetch_query = """
-        WITH latest_graded_per_restaurant AS (
-            SELECT DISTINCT ON (camis) camis, dba, grade_date
-            FROM restaurants
-            WHERE grade IN ('A', 'B', 'C', 'Z', 'P') AND grade_date IS NOT NULL
-            ORDER BY camis, grade_date DESC
-        )
-        SELECT camis, dba, grade_date
-        FROM latest_graded_per_restaurant
-        ORDER BY
-            grade_date DESC, -- Primary Sort: By date
-            dba ASC          -- Secondary Sort (tie-breaker): By name
-        LIMIT %s;
+    id_fetch_query = f"""
+        SELECT camis FROM (
+            SELECT DISTINCT ON (camis) camis, dba, dba_normalized_search, grade, inspection_date, cuisine_description, boro
+            FROM restaurants ORDER BY camis, inspection_date DESC
+        ) AS latest_restaurants
+        WHERE {where_clause} {order_by_clause} LIMIT %s OFFSET %s;
     """
     
     offset = (page - 1) * per_page
