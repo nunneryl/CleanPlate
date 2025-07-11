@@ -118,12 +118,19 @@ def search():
         order_by_clause = "ORDER BY CASE WHEN dba_normalized_search = %s THEN 0 WHEN dba_normalized_search ILIKE %s THEN 1 ELSE 2 END, similarity(dba_normalized_search, %s) DESC, length(dba_normalized_search)"
         order_by_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
-    id_fetch_query = f"""
-        SELECT camis FROM (
-            SELECT DISTINCT ON (camis) camis, dba, dba_normalized_search, grade, inspection_date, cuisine_description, boro
-            FROM restaurants ORDER BY camis, inspection_date DESC
-        ) AS latest_restaurants
-        WHERE {where_clause} {order_by_clause} LIMIT %s OFFSET %s;
+    id_fetch_query = """
+        WITH latest_graded_per_restaurant AS (
+            SELECT DISTINCT ON (camis) camis, dba, grade_date
+            FROM restaurants
+            WHERE grade IN ('A', 'B', 'C', 'Z', 'P') AND grade_date IS NOT NULL
+            ORDER BY camis, grade_date DESC
+        )
+        SELECT camis, dba, grade_date
+        FROM latest_graded_per_restaurant
+        ORDER BY
+            grade_date DESC, -- Primary Sort: By date
+            dba ASC          -- Secondary Sort (tie-breaker): By name
+        LIMIT %s;
     """
     
     offset = (page - 1) * per_page
