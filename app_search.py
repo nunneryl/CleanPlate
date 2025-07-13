@@ -91,8 +91,14 @@ def search():
     params = [f"%{normalized_search}%", normalized_search]
 
     if grade_filter:
-        where_conditions.append("grade = %s")
-        params.append(grade_filter.upper())
+        if grade_filter.upper() == 'P':
+            # If filtering for Pending, include both P and Z
+            where_conditions.append("grade IN (%s, %s)")
+            params.extend(['P', 'Z'])
+        else:
+            # Otherwise, perform a normal filter for the specific grade (A, B, or C)
+            where_conditions.append("grade = %s")
+            params.append(grade_filter.upper())
     if boro_filter:
         where_conditions.append("boro ILIKE %s")
         params.append(boro_filter)
