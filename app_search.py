@@ -1,16 +1,19 @@
+# In file: app_search.py
+
 import os
-import re
 import logging
-import json
 import threading
 import secrets
-from utils import normalize_search_term_for_hybrid
-from flask import Flask, jsonify, request, g
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import psycopg
 from psycopg.rows import dict_row
+import smtplib
+import ssl
+from email.message import EmailMessage
 
 from db_manager import DatabaseConnection
+from utils import normalize_search_term_for_hybrid
 from config import APIConfig
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
@@ -19,11 +22,73 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-@app.teardown_appcontext
-def teardown_db(exception):
-    db_conn = g.pop('db_conn', None)
-    if db_conn is not None:
-        db_conn.close()
+def _group_and_shape_results(all_rows, ordered_camis):
+    if not all_rows:
+        return []
+    restaurant_details_map = {str(camis): [] for camis in ordered_camis}
+    for row in all_rows:
+        restaurant_details_map[str(row['camis'])].append(row)
+    final_results = []
+    for camis in ordered_camis:
+        camis_str = str(camis)
+        rows_for_restaurant = restaurant_details_map.get(camis_str)
+        if not rows_for_restaurant:
+            continue
+        base_info = dict(rows_for_restaurant[0])
+        inspections = {}
+        for row in rows_for_restaurant:
+            insp_date_str = row['inspection_date'].isoformat()
+            if insp_date_str not in inspections:
+                inspections[insp_date_str] = {
+                    'inspection_date': insp_date_str,
+                    'grade': row.get('grade'),
+                    'grade_date': row['grade_date'].isoformat() if row.get('grade_date') else None,
+                    'critical_flag': row.get('critical_flag'),
+                    'inspection_type': row.get('inspection_type'),
+                    'action': row.get('action'),
+                    'violations': []
+                }
+            if row.get('violation_code'):
+                v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
+                if v_data not in inspections[insp_date_str]['violations']:
+                    inspections[insp_date_str]['violations'].append(v_data)
+        base_info['inspections'] = sorted(list(inspections.values()), key=lambda x: x['inspection_date'], reverse=True)
+        for key in ['violation_code', 'violation_description', 'grade', 'grade_date', 'action', 'inspection_date', 'critical_flag', 'inspection_type']:
+            base_info.pop(key, None)
+        final_results.append(base_info)
+    return final_results
+
+def send_report_email(report_data):
+    sender_email = os.environ.get("SENDER_EMAIL")
+    receiver_email = os.environ.get("RECEIVER_EMAIL")
+    password = os.environ.get("SENDER_PASSWORD")
+
+    if not all([sender_email, receiver_email, password]):
+        logger.error("Email credentials are not fully configured. Cannot send report.")
+        return False
+
+    camis = report_data.get("camis", "N/A")
+    issue_type = report_data.get("issue_type", "N/A")
+    comments = report_data.get("comments", "No comments.")
+    subject = f"New Issue Report for Restaurant CAMIS: {camis}"
+    body = f"A new issue has been reported by a user.\n\nRestaurant CAMIS: {camis}\nIssue Type: {issue_type}\n\nComments:\n{comments}"
+
+    msg = EmailMessage()
+    msg.set_content(body)
+    msg['Subject'] = subject
+    msg['From'] = sender_email
+    msg['To'] = receiver_email
+
+    try:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.aol.com", 465, context=context) as server:
+            server.login(sender_email, password)
+            server.send_message(msg)
+            logger.info(f"Successfully sent report email for CAMIS {camis}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send email: {e}", exc_info=True)
+        return False
 
 @app.route('/search', methods=['GET'])
 def search():
@@ -39,20 +104,22 @@ def search():
         return jsonify([])
 
     normalized_search = normalize_search_term_for_hybrid(search_term)
-    
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
     params = [f"%{normalized_search}%", normalized_search]
 
     if grade_filter:
-        where_conditions.append("grade = %s")
-        params.append(grade_filter.upper())
+        if grade_filter.upper() == 'P':
+            where_conditions.append("grade IN (%s, %s)")
+            params.extend(['P', 'Z'])
+        else:
+            where_conditions.append("grade = %s")
+            params.append(grade_filter.upper())
     if boro_filter:
         where_conditions.append("boro ILIKE %s")
         params.append(boro_filter)
     if cuisine_filter:
         where_conditions.append("cuisine_description ILIKE %s")
         params.append(f"%{cuisine_filter}%")
-    
     where_clause = " AND ".join(where_conditions)
 
     order_by_clause = ""
@@ -65,199 +132,81 @@ def search():
         order_by_clause = "ORDER BY inspection_date DESC"
     elif sort_option == 'grade_asc':
         order_by_clause = "ORDER BY CASE WHEN grade = 'A' THEN 1 WHEN grade = 'B' THEN 2 WHEN grade = 'C' THEN 3 ELSE 4 END, dba ASC"
-    else: # Default relevance sort
-        order_by_clause = """
-        ORDER BY
-            CASE WHEN dba_normalized_search = %s THEN 0
-                 WHEN dba_normalized_search ILIKE %s THEN 1
-                 ELSE 2
-            END,
-            similarity(dba_normalized_search, %s) DESC,
-            length(dba_normalized_search)
-        """
+    else:
+        order_by_clause = "ORDER BY CASE WHEN dba_normalized_search = %s THEN 0 WHEN dba_normalized_search ILIKE %s THEN 1 ELSE 2 END, similarity(dba_normalized_search, %s) DESC, length(dba_normalized_search)"
         order_by_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
-    id_fetch_query = f"""
-        SELECT camis FROM (
-            SELECT DISTINCT ON (camis) camis, dba, dba_normalized_search, grade, inspection_date, cuisine_description, boro
-            FROM restaurants
-            ORDER BY camis, inspection_date DESC
-        ) AS latest_restaurants
-        WHERE {where_clause}
-        {order_by_clause}
-        LIMIT %s OFFSET %s;
-    """
-    
+    id_fetch_query = f"SELECT camis FROM (SELECT DISTINCT ON (camis) camis, dba, dba_normalized_search, grade, inspection_date, cuisine_description, boro FROM restaurants ORDER BY camis, inspection_date DESC) AS latest_restaurants WHERE {where_clause} {order_by_clause} LIMIT %s OFFSET %s;"
     offset = (page - 1) * per_page
     id_fetch_params = tuple(params + order_by_params + [per_page, offset])
 
     try:
         with DatabaseConnection() as conn:
             conn.row_factory = dict_row
-
             with conn.cursor() as cursor:
                 cursor.execute(id_fetch_query, id_fetch_params)
                 paginated_camis_tuples = cursor.fetchall()
-            
             if not paginated_camis_tuples:
                 return jsonify([])
-
             paginated_camis = [item['camis'] for item in paginated_camis_tuples]
-            
-            details_query = """
-                SELECT r.*, v.violation_code, v.violation_description
-                FROM restaurants r
-                LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-                WHERE r.camis = ANY(%s)
-            """
+            details_query = "SELECT r.*, v.violation_code, v.violation_description FROM restaurants r LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date WHERE r.camis = ANY(%s)"
             with conn.cursor() as details_cursor:
                 details_cursor.execute(details_query, (paginated_camis,))
                 all_rows = details_cursor.fetchall()
-
     except Exception as e:
         logger.error(f"DB search failed for '{search_term}': {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
-    restaurant_details_map = {str(camis): [] for camis in paginated_camis}
-    for row in all_rows:
-        restaurant_details_map[str(row['camis'])].append(row)
-
-    final_results = []
-    for camis in paginated_camis:
-        camis_str = str(camis)
-        rows_for_restaurant = restaurant_details_map.get(camis_str)
-        if not rows_for_restaurant:
-            continue
-        base_info = dict(rows_for_restaurant[0])
-        
-        inspections = {}
-        for row in rows_for_restaurant:
-            insp_date_str = row['inspection_date'].isoformat()
-            if insp_date_str not in inspections:
-                inspections[insp_date_str] = {
-                    'inspection_date': insp_date_str,
-                    'grade': row.get('grade'),
-                    'critical_flag': row.get('critical_flag'),
-                    'inspection_type': row.get('inspection_type'),
-                    'action': row.get('action'),
-                    'violations': []
-                }
-            if row.get('violation_code'):
-                v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
-                if v_data not in inspections[insp_date_str]['violations']:
-                    inspections[insp_date_str]['violations'].append(v_data)
-
-        base_info['inspections'] = sorted(list(inspections.values()), key=lambda x: x['inspection_date'], reverse=True)
-        
-        for key in ['violation_code', 'violation_description', 'grade', 'inspection_date', 'critical_flag', 'inspection_type', 'action']:
-            base_info.pop(key, None)
-            
-        final_results.append(base_info)
-        
+    final_results = _group_and_shape_results(all_rows, paginated_camis)
     return jsonify(final_results)
-    
+
 @app.route('/lists/recently-graded', methods=['GET'])
 def get_recently_graded():
-    """
-    Returns a list of the top 100 most recently graded restaurants.
-    The 'limit' query parameter can be used to fetch a smaller set (e.g., for the home screen).
-    """
     logger.info("Request received for /lists/recently-graded")
-    
     limit = int(request.args.get('limit', 100, type=int))
-    
-    # --- THIS IS THE DEFINITIVELY CORRECTED QUERY ---
-    # It uses a Common Table Expression (CTE) for clarity and selects the columns
-    # needed for sorting in the final step.
-    id_fetch_query = """
-        WITH latest_graded_per_restaurant AS (
-            SELECT DISTINCT ON (camis) camis, dba, grade_date
-            FROM restaurants
-            WHERE grade IN ('A', 'B', 'C') AND grade_date IS NOT NULL
-            ORDER BY camis, grade_date DESC
-        )
-        SELECT camis, dba, grade_date
-        FROM latest_graded_per_restaurant
-        ORDER BY
-            grade_date DESC, -- Primary Sort: By date
-            dba ASC          -- Secondary Sort (tie-breaker): By name
-        LIMIT %s;
-    """
-    
+    id_fetch_query = "WITH latest_graded_per_restaurant AS (SELECT DISTINCT ON (camis) camis, dba, grade_date FROM restaurants WHERE grade IN ('A', 'B', 'C', 'Z', 'P') AND grade_date IS NOT NULL ORDER BY camis, grade_date DESC) SELECT camis FROM latest_graded_per_restaurant ORDER BY grade_date DESC, dba ASC LIMIT %s;"
     try:
         with DatabaseConnection() as conn:
             conn.row_factory = dict_row
             with conn.cursor() as cursor:
-                logger.info(f"Executing query for recently graded CAMIS with limit={limit}.")
                 cursor.execute(id_fetch_query, (limit,))
-                # This will now be a list of dictionaries, each with 'camis', 'dba', 'grade_date'
-                recently_graded_tuples = cursor.fetchall()
-
-            if not recently_graded_tuples:
+                top_camis_tuples = cursor.fetchall()
+            if not top_camis_tuples:
                 return jsonify([])
-
-            # The Python code will correctly extract just the 'camis' from each dictionary
-            top_camis_list = [item['camis'] for item in recently_graded_tuples]
-            
-            details_query = """
-                SELECT r.*, v.violation_code, v.violation_description
-                FROM restaurants r
-                LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-                WHERE r.camis = ANY(%s)
-                ORDER BY r.camis, r.inspection_date DESC;
-            """
+            top_camis_list = [item['camis'] for item in top_camis_tuples]
+            details_query = "SELECT r.*, v.violation_code, v.violation_description FROM restaurants r LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date WHERE r.camis = ANY(%s) ORDER BY r.camis, r.inspection_date DESC;"
             with conn.cursor() as details_cursor:
                 details_cursor.execute(details_query, (top_camis_list,))
                 all_rows = details_cursor.fetchall()
-
     except Exception as e:
         logger.error(f"DB query failed for recently-graded list: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
-
-    # The JSON shaping logic is unchanged and remains correct.
-    restaurant_details_map = {str(camis): [] for camis in top_camis_list}
-    for row in all_rows:
-        restaurant_details_map[str(row['camis'])].append(row)
-    final_results = []
-    for camis in top_camis_list:
-        camis_str = str(camis)
-        rows_for_restaurant = restaurant_details_map.get(camis_str)
-        if not rows_for_restaurant: continue
-        base_info = dict(rows_for_restaurant[0])
-        inspections = {}
-        for row in rows_for_restaurant:
-            insp_date_str = row['inspection_date'].isoformat()
-            if insp_date_str not in inspections:
-                inspections[insp_date_str] = {
-                    'inspection_date': insp_date_str, 'grade': row['grade'],
-                    'grade_date': row['grade_date'].isoformat() if row.get('grade_date') else None,
-                    'action': row.get('action'), 'critical_flag': row['critical_flag'],
-                    'inspection_type': row['inspection_type'], 'violations': []
-                }
-            if row.get('violation_code'):
-                v_data = {'violation_code': row['violation_code'], 'violation_description': row['violation_description']}
-                if v_data not in inspections[insp_date_str]['violations']:
-                    inspections[insp_date_str]['violations'].append(v_data)
-        base_info['inspections'] = sorted(list(inspections.values()), key=lambda x: x['inspection_date'], reverse=True)
-        for key in ['violation_code', 'violation_description', 'grade', 'grade_date', 'action', 'inspection_date', 'critical_flag', 'inspection_type']:
-            base_info.pop(key, None)
-        final_results.append(base_info)
-        
+    final_results = _group_and_shape_results(all_rows, top_camis_list)
     return jsonify(final_results)
 
-# This endpoint is now restored to its normal daily operation state
+@app.route('/report-issue', methods=['POST'])
+def report_issue():
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+    data = request.get_json()
+    if not all(k in data for k in ["camis", "issue_type", "comments"]):
+        return jsonify({"error": "Missing required fields"}), 400
+    logger.info(f"Received issue report: {data}")
+    if send_report_email(data):
+        return jsonify({"status": "success", "message": "Report received."}), 200
+    else:
+        return jsonify({"status": "error", "message": "Failed to process report."}), 500
+
 @app.route('/trigger-update', methods=['POST'])
 def trigger_update():
     try:
         from update_database import run_database_update
     except ImportError:
         return jsonify({"status": "error", "message": "Update logic currently unavailable."}), 503
-        
     provided_key = request.headers.get('X-Update-Secret')
     expected_key = APIConfig.UPDATE_SECRET_KEY
     if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
         return jsonify({"status": "error", "message": "Unauthorized."}), 403
-    
     threading.Thread(target=run_database_update, args=(15,), daemon=True).start()
     return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
 

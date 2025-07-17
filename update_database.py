@@ -1,4 +1,3 @@
-import os
 import logging
 import argparse
 from utils import normalize_search_term_for_hybrid
@@ -10,6 +9,14 @@ import psycopg
 from db_manager import DatabaseConnection, DatabaseManager
 from config import APIConfig
 
+# --- Constants ---
+CRITICAL_FLAG = 'Critical'
+NOT_CRITICAL_FLAG = 'Not Critical'
+NOT_APPLICABLE = 'N/A'
+NYC_API_BASE_URL = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
+API_RECORD_LIMIT = 50000
+
+# --- Logger Setup ---
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     handler = logging.StreamHandler()
@@ -17,6 +24,15 @@ if not logger.hasHandlers():
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
+
+def _to_float_or_none(value_str):
+    """Converts a string to float, returns None if invalid."""
+    if value_str and value_str not in [NOT_APPLICABLE, '']:
+        try:
+            return float(value_str)
+        except (ValueError, TypeError):
+            return None
+    return None
 
 def convert_date(date_str):
     if not date_str or not isinstance(date_str, str): return None
@@ -27,9 +43,14 @@ def convert_date(date_str):
 
 def fetch_data(days_back=15):
     logger.info(f"Fetching data from NYC API for past {days_back} days...")
-    query = f"https://data.cityofnewyork.us/resource/43nn-pn8j.json?$where=inspection_date >= '{(datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')}T00:00:00.000'&$limit=50000"
+    
+    api_params = {
+        "$where": f"inspection_date >= '{(datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')}T00:00:00.000'",
+        "$limit": API_RECORD_LIMIT
+    }
+
     try:
-        response = requests.get(query, timeout=90)
+        response = requests.get(NYC_API_BASE_URL, params=api_params, timeout=90)
         response.raise_for_status()
         data = response.json()
         logger.info(f"Total records fetched: {len(data)}")
@@ -67,20 +88,19 @@ def update_database_batch(data):
         dba = item.get("dba")
         normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
         
-        is_critical = any(v.get("critical_flag") == 'Critical' for v in inspection["violations"])
-        critical_flag_for_inspection = 'Critical' if is_critical else 'Not Critical'
+        is_critical = any(v.get("critical_flag") == CRITICAL_FLAG for v in inspection["violations"])
+        critical_flag_for_inspection = CRITICAL_FLAG if is_critical else NOT_CRITICAL_FLAG
 
-        # This tuple now includes the 'action' field to correctly save closure status.
         restaurants_to_insert.append((
             camis, dba, normalized_dba,
             item.get("boro"), item.get("building"), item.get("street"),
             item.get("zipcode"), item.get("phone"),
-            float(item.get("latitude")) if item.get("latitude") and item.get("latitude") not in ['N/A', ''] else None,
-            float(item.get("longitude")) if item.get("longitude") and item.get("longitude") not in ['N/A', ''] else None,
+            _to_float_or_none(item.get("latitude")),
+            _to_float_or_none(item.get("longitude")),
             item.get("grade"), inspection_date, critical_flag_for_inspection,
             item.get("inspection_type"), item.get("cuisine_description"),
             convert_date(item.get("grade_date")),
-            item.get("action") # The 'action' field from your "Closed Restaurant" feature.
+            item.get("action")
         ))
         
         for v_item in inspection["violations"]:
@@ -90,8 +110,6 @@ def update_database_batch(data):
     with DatabaseConnection() as conn, conn.cursor() as cursor:
         if restaurants_to_insert:
             logger.info(f"Executing batch insert for {len(restaurants_to_insert)} unique restaurant inspections...")
-            
-            # This SQL query is the final, correct version.
             upsert_sql = """
                 INSERT INTO restaurants (
                     camis, dba, dba_normalized_search, boro, building, street, zipcode, phone,
@@ -123,7 +141,6 @@ def update_database_batch(data):
 
     return r_count, v_count
 
-
 def run_database_update(days_back=15):
     logger.info(f"Starting DB update (days_back={days_back})")
     data = fetch_data(days_back)
@@ -140,6 +157,5 @@ if __name__ == '__main__':
     args = parser.parse_args()
     run_database_update(days_back=args.days)
     
-    # It's good practice to close the pool at the end of a standalone script run
     DatabaseManager.close_all_connections()
     logger.info("Database connection pool closed.")
