@@ -1,6 +1,6 @@
 # In file: .github/workflows/backfill_cron.yml
 
-name: Weekly Data Backfill
+name: Weekly FourSquare API Updates (Google Maps)
 
 on:
   # CORRECTED: Schedule to run at 3 AM every Sunday
