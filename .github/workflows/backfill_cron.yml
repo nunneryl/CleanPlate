@@ -1,0 +1,36 @@
+# In file: .github/workflows/backfill_cron.yml
+
+name: Weekly Data Backfill
+
+on:
+  # CORRECTED: Schedule to run at 3 AM every Sunday
+  schedule:
+    - cron: '0 3 * * 0'
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  run-backfill:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install requests psycopg[binary] python-dotenv pandas
+
+      - name: Run backfill script
+        env:
+          FOURSQUARE_API_KEY: ${{ secrets.FOURSQUARE_API_KEY }}
+          Maps_API_KEY: ${{ secrets.Maps_API_KEY }}
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: python3 backfill.py
