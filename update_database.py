@@ -14,7 +14,7 @@ CRITICAL_FLAG = 'Critical'
 NOT_CRITICAL_FLAG = 'Not Critical'
 NOT_APPLICABLE = 'N/A'
 NYC_API_BASE_URL = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
-API_RECORD_LIMIT = 500000 # Increased limit for backfill
+API_RECORD_LIMIT = 500000
 
 # --- Logger Setup ---
 logger = logging.getLogger(__name__)
@@ -26,7 +26,6 @@ if not logger.hasHandlers():
     logger.setLevel(logging.INFO)
 
 def _to_float_or_none(value_str):
-    """Converts a string to float, returns None if invalid."""
     if value_str and value_str not in [NOT_APPLICABLE, '']:
         try:
             return float(value_str)
@@ -42,17 +41,11 @@ def convert_date(date_str):
         return None
 
 def fetch_data(days_back=3):
-    """
-    Fetches records from the NYC API that have been *updated* in the last few days.
-    This captures new inspections, grade changes, and data corrections.
-    """
     logger.info(f"Fetching records updated in the last {days_back} days from NYC API...")
-    
     api_params = {
         "$where": f":updated_at >= '{(datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')}T00:00:00.000'",
         "$limit": API_RECORD_LIMIT
     }
-
     try:
         response = requests.get(NYC_API_BASE_URL, params=api_params, timeout=180)
         response.raise_for_status()
@@ -74,10 +67,7 @@ def update_database_batch(data):
         
         inspection_key = (camis, inspection_date)
         if inspection_key not in inspections_data:
-            inspections_data[inspection_key] = {
-                "details": item,
-                "violations": []
-            }
+            inspections_data[inspection_key] = {"details": item, "violations": []}
         
         if item.get("violation_code"):
             inspections_data[inspection_key]["violations"].append(item)
@@ -87,7 +77,20 @@ def update_database_batch(data):
 
     for key, inspection in inspections_data.items():
         camis, inspection_date = key
-        
+
+        # --- DEBUG LOGGING FOR PLUG UGLIES ---
+        if camis == '50130412' and inspection_date.strftime('%Y-%m-%d') == '2025-01-28':
+            logger.info("="*50)
+            logger.info(f"DEBUG: Found PLUG UGLIES (CAMIS {camis}) for {inspection_date}")
+            # Re-run logic to be explicit for logging
+            has_final_grade = next((v for v in inspection["violations"] if v.get("grade") and v.get("grade") in ['A', 'B', 'C']), None)
+            has_any_action = next((v for v in inspection["violations"] if v.get("action")), None)
+            details_item_for_debug = has_final_grade or has_any_action or inspection["details"]
+            logger.info(f"  - Master Record Grade being sent to DB: {details_item_for_debug.get('grade')}")
+            logger.info(f"  - Master Record Action being sent to DB: {details_item_for_debug.get('action')}")
+            logger.info("="*50)
+        # --- END DEBUG LOGGING ---
+
         has_final_grade = next((v for v in inspection["violations"] if v.get("grade") and v.get("grade") in ['A', 'B', 'C']), None)
         has_any_action = next((v for v in inspection["violations"] if v.get("action")), None)
         details_item = has_final_grade or has_any_action or inspection["details"]
@@ -114,6 +117,7 @@ def update_database_batch(data):
             if v_item.get("violation_code"):
                 violations_to_insert.append((camis, inspection_date, v_item.get("violation_code"), v_item.get("violation_description")))
 
+    # ... rest of the function is the same ...
     r_count, v_count = 0, 0
     with DatabaseConnection() as conn, conn.cursor() as cursor:
         if restaurants_to_insert:
@@ -132,11 +136,9 @@ def update_database_batch(data):
                     critical_flag = EXCLUDED.critical_flag,
                     action = EXCLUDED.action;
             """
-        
             cursor.executemany(upsert_sql, restaurants_to_insert)
             r_count = cursor.rowcount
             logger.info(f"Restaurant insert executed. Affected rows: {r_count}")
-
         if violations_to_insert:
             unique_violations = list(set(violations_to_insert))
             logger.info(f"Executing batch insert for {len(unique_violations)} unique violations...")
@@ -144,10 +146,8 @@ def update_database_batch(data):
             cursor.executemany(insert_sql, unique_violations)
             v_count = cursor.rowcount
             logger.info(f"Violation insert executed. Affected rows: {v_count}")
-        
         conn.commit()
         logger.info("DB transaction explicitly committed.")
-
     return r_count, v_count
 
 def run_database_update(days_back=3):
@@ -165,6 +165,5 @@ if __name__ == '__main__':
     parser.add_argument("--days", type=int, default=3, help="Number of past days to fetch data for.")
     args = parser.parse_args()
     run_database_update(days_back=args.days)
-    
     DatabaseManager.close_all_connections()
     logger.info("Database connection pool closed.")
