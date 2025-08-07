@@ -78,19 +78,6 @@ def update_database_batch(data):
     for key, inspection in inspections_data.items():
         camis, inspection_date = key
 
-        # --- DEBUG LOGGING FOR PLUG UGLIES ---
-        if camis == '50130412' and inspection_date.strftime('%Y-%m-%d') == '2025-01-28':
-            logger.info("="*50)
-            logger.info(f"DEBUG: Found PLUG UGLIES (CAMIS {camis}) for {inspection_date}")
-            # Re-run logic to be explicit for logging
-            has_final_grade = next((v for v in inspection["violations"] if v.get("grade") and v.get("grade") in ['A', 'B', 'C']), None)
-            has_any_action = next((v for v in inspection["violations"] if v.get("action")), None)
-            details_item_for_debug = has_final_grade or has_any_action or inspection["details"]
-            logger.info(f"  - Master Record Grade being sent to DB: {details_item_for_debug.get('grade')}")
-            logger.info(f"  - Master Record Action being sent to DB: {details_item_for_debug.get('action')}")
-            logger.info("="*50)
-        # --- END DEBUG LOGGING ---
-
         has_final_grade = next((v for v in inspection["violations"] if v.get("grade") and v.get("grade") in ['A', 'B', 'C']), None)
         has_any_action = next((v for v in inspection["violations"] if v.get("action")), None)
         details_item = has_final_grade or has_any_action or inspection["details"]
@@ -117,7 +104,6 @@ def update_database_batch(data):
             if v_item.get("violation_code"):
                 violations_to_insert.append((camis, inspection_date, v_item.get("violation_code"), v_item.get("violation_description")))
 
-    # ... rest of the function is the same ...
     r_count, v_count = 0, 0
     with DatabaseConnection() as conn, conn.cursor() as cursor:
         if restaurants_to_insert:
