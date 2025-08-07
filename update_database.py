@@ -14,7 +14,7 @@ CRITICAL_FLAG = 'Critical'
 NOT_CRITICAL_FLAG = 'Not Critical'
 NOT_APPLICABLE = 'N/A'
 NYC_API_BASE_URL = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
-API_RECORD_LIMIT = 5000000
+API_RECORD_LIMIT = 500000 # Increased limit for backfill
 
 # --- Logger Setup ---
 logger = logging.getLogger(__name__)
@@ -48,15 +48,13 @@ def fetch_data(days_back=3):
     """
     logger.info(f"Fetching records updated in the last {days_back} days from NYC API...")
     
-    # Using the system field `:updated_at` to get recently modified records.
-    # This is the key change to fix the stale data issue.
     api_params = {
         "$where": f":updated_at >= '{(datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')}T00:00:00.000'",
         "$limit": API_RECORD_LIMIT
     }
 
     try:
-        response = requests.get(NYC_API_BASE_URL, params=api_params, timeout=90)
+        response = requests.get(NYC_API_BASE_URL, params=api_params, timeout=180)
         response.raise_for_status()
         data = response.json()
         logger.info(f"Total records fetched: {len(data)}")
@@ -74,17 +72,13 @@ def update_database_batch(data):
         inspection_date = convert_date(item.get("inspection_date"))
         if not (camis and inspection_date): continue
         
-        # We need a unique key for each *violation* record, not just each inspection.
-        # The primary key in the DB is (camis, inspection_date, violation_code).
-        # However, for processing, grouping by inspection is what we want.
         inspection_key = (camis, inspection_date)
         if inspection_key not in inspections_data:
             inspections_data[inspection_key] = {
-                "details": item, # Store the first item as the representative 'details'
+                "details": item,
                 "violations": []
             }
         
-        # Add every record to the violations list to correctly calculate the critical flag.
         if item.get("violation_code"):
             inspections_data[inspection_key]["violations"].append(item)
 
@@ -93,9 +87,10 @@ def update_database_batch(data):
 
     for key, inspection in inspections_data.items():
         camis, inspection_date = key
-        # The 'details' item might not have the final 'action' if multiple records exist for one inspection.
-        # We should find the record that actually contains the action text.
-        details_item = next((v for v in inspection["violations"] if v.get("action")), inspection["details"])
+        
+        has_final_grade = next((v for v in inspection["violations"] if v.get("grade") and v.get("grade") in ['A', 'B', 'C']), None)
+        has_any_action = next((v for v in inspection["violations"] if v.get("action")), None)
+        details_item = has_final_grade or has_any_action or inspection["details"]
 
         dba = details_item.get("dba")
         normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
@@ -116,7 +111,8 @@ def update_database_batch(data):
         ))
         
         for v_item in inspection["violations"]:
-            violations_to_insert.append((camis, inspection_date, v_item.get("violation_code"), v_item.get("violation_description")))
+            if v_item.get("violation_code"):
+                violations_to_insert.append((camis, inspection_date, v_item.get("violation_code"), v_item.get("violation_description")))
 
     r_count, v_count = 0, 0
     with DatabaseConnection() as conn, conn.cursor() as cursor:
@@ -172,7 +168,3 @@ if __name__ == '__main__':
     
     DatabaseManager.close_all_connections()
     logger.info("Database connection pool closed.")
-
-
-
-
