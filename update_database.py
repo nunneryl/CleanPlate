@@ -14,7 +14,7 @@ CRITICAL_FLAG = 'Critical'
 NOT_CRITICAL_FLAG = 'Not Critical'
 NOT_APPLICABLE = 'N/A'
 NYC_API_BASE_URL = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
-API_RECORD_LIMIT = 50000
+API_RECORD_LIMIT = 5000000
 
 # --- Logger Setup ---
 logger = logging.getLogger(__name__)
