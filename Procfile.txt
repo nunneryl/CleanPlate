@@ -1,1 +1,2 @@
 web: gunicorn -c gunicorn_config.py app_search:app
+worker: python3 backfill.py

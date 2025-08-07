@@ -12,17 +12,28 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 def get_unmatched_restaurants(conn, limit=5000):
     """
-    Fetches a limited batch of unique restaurants that have not yet been matched.
+    Fetches a limited batch of unique restaurants that have not yet been matched,
+    prioritizing the most recently inspected restaurants first.
     """
-    logging.info(f"Fetching a batch of up to {limit} unmatched restaurants...")
-    # UPDATED: Added the LIMIT %s clause to the SQL query
+    logging.info(f"Fetching a batch of up to {limit} unmatched restaurants (prioritizing newest)...")
+    
+    # UPDATED: This query now prioritizes restaurants by their most recent inspection date.
     query = """
-        SELECT DISTINCT ON (camis)
+        WITH latest_inspections AS (
+            SELECT *, ROW_NUMBER() OVER(PARTITION BY camis ORDER BY inspection_date DESC) as rn
+            FROM public.restaurants
+        ),
+        latest_unique_restaurants AS (
+            SELECT * FROM latest_inspections WHERE rn = 1
+        )
+        SELECT 
             camis, dba, building, street, latitude, longitude
         FROM 
-            public.restaurants
+            latest_unique_restaurants
         WHERE 
             foursquare_fsq_id IS NULL
+        ORDER BY 
+            inspection_date DESC
         LIMIT %s;
     """
     with conn.cursor() as cur:
@@ -70,37 +81,38 @@ def main():
 
             if total_restaurants == 0:
                 logging.info("No restaurants to process. Backfill may be complete.")
-                return
-
-            for index, restaurant in enumerate(restaurants_to_process):
-                camis, dba, building, street, latitude, longitude = restaurant
-                logging.info(f"Processing {index + 1}/{total_restaurants}: {dba} (CAMIS: {camis})")
-                
-                fsq_status, fsq_data = foursquare.find_match(name=dba, latitude=latitude, longitude=longitude)
-                
-                if fsq_status == "success":
-                    fsq_id = fsq_data.get("fsq_place_id")
-                    full_address = f"{building} {street}"
+                # We still want to print the final summary, even if it's all zeros.
+            else:
+                for index, restaurant in enumerate(restaurants_to_process):
+                    camis, dba, building, street, latitude, longitude = restaurant
+                    logging.info(f"Processing {index + 1}/{total_restaurants}: {dba} (CAMIS: {camis})")
                     
-                    google_status, google_id = google.find_place_id(name=dba, address=full_address)
+                    fsq_status, fsq_data = foursquare.find_match(name=dba, latitude=latitude, longitude=longitude)
                     
-                    if google_status == "success":
-                        update_restaurant_ids(conn, camis, fsq_id, google_id)
-                        logging.info(f"  -> SUCCESS: Updated DB with FSQ_ID: {fsq_id}, GOOGLE_ID: {google_id}")
-                        stats["succeeded"] += 1
-                    else:
-                        update_restaurant_ids(conn, camis, fsq_id, None)
-                        logging.warning(f"  -> PARTIAL SUCCESS: Updated DB with FSQ_ID: {fsq_id}, Google failed.")
-                        stats["succeeded"] += 1
-                
-                elif fsq_status == "no_match":
-                    stats["no_match"] += 1
-                elif fsq_status == "missing_data":
-                    stats["missing_data"] += 1
-                else: # fsq_status == "failed"
-                    stats["failed"] += 1
-                
-                time.sleep(0.5)
+                    if fsq_status == "success":
+                        fsq_id = fsq_data.get("fsq_place_id")
+                        full_address = f"{building} {street}"
+                        
+                        google_status, google_id = google.find_place_id(name=dba, address=full_address)
+                        
+                        if google_status == "success":
+                            update_restaurant_ids(conn, camis, fsq_id, google_id)
+                            logging.info(f"  -> SUCCESS: Updated DB with FSQ_ID: {fsq_id}, GOOGLE_ID: {google_id}")
+                            stats["succeeded"] += 1
+                        else:
+                            update_restaurant_ids(conn, camis, fsq_id, None)
+                            logging.warning(f"  -> PARTIAL SUCCESS: Updated DB with FSQ_ID: {fsq_id}, Google failed.")
+                            stats["succeeded"] += 1
+                    
+                    elif fsq_status == "no_match":
+                        stats["no_match"] += 1
+                    elif fsq_status == "missing_data":
+                        logging.warning(f"  -> SKIPPED: Missing location data in database.")
+                        stats["missing_data"] += 1
+                    else: # fsq_status == "failed"
+                        stats["failed"] += 1
+                    
+                    time.sleep(0.5)
 
     except psycopg.Error as e:
         logging.error(f"Database connection error: {e}")
