@@ -41,17 +41,11 @@ def convert_date(date_str):
     except (ValueError, TypeError):
         return None
 
-def fetch_data(days_back=3):
-    """
-    Fetches records from the NYC API that have been *updated* in the last few days.
-    This captures new inspections, grade changes, and data corrections.
-    """
-    logger.info(f"Fetching records updated in the last {days_back} days from NYC API...")
+def fetch_data(days_back=15):
+    logger.info(f"Fetching data from NYC API for past {days_back} days...")
     
-    # Using the system field `:updated_at` to get recently modified records.
-    # This is the key change to fix the stale data issue.
     api_params = {
-        "$where": f":updated_at >= '{(datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')}T00:00:00.000'",
+        "$where": f"inspection_date >= '{(datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')}T00:00:00.000'",
         "$limit": API_RECORD_LIMIT
     }
 
@@ -74,17 +68,13 @@ def update_database_batch(data):
         inspection_date = convert_date(item.get("inspection_date"))
         if not (camis and inspection_date): continue
         
-        # We need a unique key for each *violation* record, not just each inspection.
-        # The primary key in the DB is (camis, inspection_date, violation_code).
-        # However, for processing, grouping by inspection is what we want.
         inspection_key = (camis, inspection_date)
         if inspection_key not in inspections_data:
             inspections_data[inspection_key] = {
-                "details": item, # Store the first item as the representative 'details'
+                "details": item,
                 "violations": []
             }
         
-        # Add every record to the violations list to correctly calculate the critical flag.
         if item.get("violation_code"):
             inspections_data[inspection_key]["violations"].append(item)
 
@@ -93,11 +83,9 @@ def update_database_batch(data):
 
     for key, inspection in inspections_data.items():
         camis, inspection_date = key
-        # The 'details' item might not have the final 'action' if multiple records exist for one inspection.
-        # We should find the record that actually contains the action text.
-        details_item = next((v for v in inspection["violations"] if v.get("action")), inspection["details"])
-
-        dba = details_item.get("dba")
+        item = inspection["details"]
+        
+        dba = item.get("dba")
         normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
         
         is_critical = any(v.get("critical_flag") == CRITICAL_FLAG for v in inspection["violations"])
@@ -105,14 +93,14 @@ def update_database_batch(data):
 
         restaurants_to_insert.append((
             camis, dba, normalized_dba,
-            details_item.get("boro"), details_item.get("building"), details_item.get("street"),
-            details_item.get("zipcode"), details_item.get("phone"),
-            _to_float_or_none(details_item.get("latitude")),
-            _to_float_or_none(details_item.get("longitude")),
-            details_item.get("grade"), inspection_date, critical_flag_for_inspection,
-            details_item.get("inspection_type"), details_item.get("cuisine_description"),
-            convert_date(details_item.get("grade_date")),
-            details_item.get("action")
+            item.get("boro"), item.get("building"), item.get("street"),
+            item.get("zipcode"), item.get("phone"),
+            _to_float_or_none(item.get("latitude")),
+            _to_float_or_none(item.get("longitude")),
+            item.get("grade"), inspection_date, critical_flag_for_inspection,
+            item.get("inspection_type"), item.get("cuisine_description"),
+            convert_date(item.get("grade_date")),
+            item.get("action")
         ))
         
         for v_item in inspection["violations"]:
@@ -128,7 +116,7 @@ def update_database_batch(data):
                     latitude, longitude, grade, inspection_date, critical_flag,
                     inspection_type, cuisine_description, grade_date, action
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
-                ON CONFLICT (camis, inspection_date) DO UPDATE SET
+                ON CONFLICT ON CONSTRAINT restaurants_pkey DO UPDATE SET
                     dba = EXCLUDED.dba,
                     dba_normalized_search = EXCLUDED.dba_normalized_search,
                     boro = EXCLUDED.boro,
@@ -136,7 +124,6 @@ def update_database_batch(data):
                     critical_flag = EXCLUDED.critical_flag,
                     action = EXCLUDED.action;
             """
-        
             cursor.executemany(upsert_sql, restaurants_to_insert)
             r_count = cursor.rowcount
             logger.info(f"Restaurant insert executed. Affected rows: {r_count}")
@@ -154,7 +141,7 @@ def update_database_batch(data):
 
     return r_count, v_count
 
-def run_database_update(days_back=3):
+def run_database_update(days_back=15):
     logger.info(f"Starting DB update (days_back={days_back})")
     data = fetch_data(days_back)
     if data:
@@ -166,7 +153,7 @@ def run_database_update(days_back=3):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Update restaurant inspection database.")
-    parser.add_argument("--days", type=int, default=3, help="Number of past days to fetch data for.")
+    parser.add_argument("--days", type=int, default=15, help="Number of past days to fetch data for.")
     args = parser.parse_args()
     run_database_update(days_back=args.days)
     
