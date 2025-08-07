@@ -104,23 +104,31 @@ def search():
         return jsonify([])
 
     normalized_search = normalize_search_term_for_hybrid(search_term)
+    
+    # --- MODIFIED LOGIC FOR FILTERS ---
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
     params = [f"%{normalized_search}%", normalized_search]
 
     if grade_filter:
-        if grade_filter.upper() == 'P':
-            where_conditions.append("grade IN (%s, %s)")
-            params.extend(['P', 'Z'])
+        grade_upper = grade_filter.upper()
+        if grade_upper == 'P':
+            where_conditions.append("grade IN ('P', 'Z')")
+        elif grade_upper == 'CLOSED':
+            where_conditions.append("action ILIKE %s")
+            params.append('%closed by dohmh%')
         else:
             where_conditions.append("grade = %s")
-            params.append(grade_filter.upper())
+            params.append(grade_upper)
+            
     if boro_filter:
         where_conditions.append("boro ILIKE %s")
         params.append(boro_filter)
     if cuisine_filter:
         where_conditions.append("cuisine_description ILIKE %s")
         params.append(f"%{cuisine_filter}%")
+        
     where_clause = " AND ".join(where_conditions)
+    # --- END MODIFIED LOGIC ---
 
     order_by_clause = ""
     order_by_params = []
@@ -136,9 +144,24 @@ def search():
         order_by_clause = "ORDER BY CASE WHEN dba_normalized_search = %s THEN 0 WHEN dba_normalized_search ILIKE %s THEN 1 ELSE 2 END, similarity(dba_normalized_search, %s) DESC, length(dba_normalized_search)"
         order_by_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
-    id_fetch_query = f"SELECT camis FROM (SELECT DISTINCT ON (camis) camis, dba, dba_normalized_search, grade, inspection_date, cuisine_description, boro FROM restaurants ORDER BY camis, inspection_date DESC) AS latest_restaurants WHERE {where_clause} {order_by_clause} LIMIT %s OFFSET %s;"
+    # --- REWRITTEN QUERY TO FIX FILTER BUG ---
+    # This query now correctly finds the latest inspection for each restaurant first,
+    # and only then applies the filters to that latest record.
+    id_fetch_query = f"""
+        WITH latest_restaurants AS (
+            SELECT DISTINCT ON (camis) *
+            FROM restaurants
+            ORDER BY camis, inspection_date DESC
+        )
+        SELECT camis 
+        FROM latest_restaurants 
+        WHERE {where_clause}
+        {order_by_clause}
+        LIMIT %s OFFSET %s;
+    """
     offset = (page - 1) * per_page
     id_fetch_params = tuple(params + order_by_params + [per_page, offset])
+    # --- END REWRITTEN QUERY ---
 
     try:
         with DatabaseConnection() as conn:
@@ -223,4 +246,3 @@ if __name__ == "__main__":
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", 8080))
     app.run(host=host, port=port)
-
