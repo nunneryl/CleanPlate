@@ -183,6 +183,44 @@ def search():
     final_results = _group_and_shape_results(all_rows, paginated_camis)
     return jsonify(final_results)
 
+@app.route('/restaurant/<string:camis>', methods=['GET'])
+def get_restaurant_by_camis(camis):
+    """
+    Fetches the full details and entire inspection history for a single
+    restaurant identified by its CAMIS.
+    """
+    if not camis.isdigit():
+        return jsonify({"error": "Invalid CAMIS format"}), 400
+
+    logger.info(f"Request received for full details of CAMIS: {camis}")
+    
+    try:
+        with DatabaseConnection() as conn:
+            conn.row_factory = dict_row
+            details_query = """
+                SELECT r.*, v.violation_code, v.violation_description 
+                FROM restaurants r 
+                LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date 
+                WHERE r.camis = %s
+            """
+            with conn.cursor() as details_cursor:
+                details_cursor.execute(details_query, (camis,))
+                all_rows = details_cursor.fetchall()
+
+            if not all_rows:
+                return jsonify({"error": "Restaurant not found"}), 404
+
+    except Exception as e:
+        logger.error(f"DB query failed for CAMIS '{camis}': {e}", exc_info=True)
+        return jsonify({"error": "Database query failed"}), 500
+
+    # We can reuse your existing helper function to shape the data perfectly.
+    final_results = _group_and_shape_results(all_rows, [camis])
+    if not final_results:
+        return jsonify({"error": "Failed to shape restaurant data"}), 500
+
+    return jsonify(final_results[0]) # Return the single restaurant object, not a list
+
 @app.route('/lists/recently-graded', methods=['GET'])
 def get_recently_graded():
     """
