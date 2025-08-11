@@ -224,14 +224,10 @@ def get_restaurant_by_camis(camis):
 @app.route('/lists/recently-graded', methods=['GET'])
 def get_recently_graded():
     """
-    Gets a list of unique restaurants based on their single most recent inspection.
-    This final version fetches data efficiently AND shapes it into the nested format
-    the iOS client expects ([Restaurant] with a nested [Inspection] array).
+    Gets a list of unique restaurants based on their single most recent inspection
+    within the last 7 days.
     """
     logger.info("Request received for /lists/recently-graded")
-    limit = int(request.args.get('limit', 100, type=int))
-    
-    # This efficient query remains the same.
     query = """
         WITH latest_inspections_per_restaurant AS (
             SELECT
@@ -244,21 +240,23 @@ def get_recently_graded():
         FROM
             latest_inspections_per_restaurant
         WHERE
-            rn = 1 AND grade_date IS NOT NULL
+            rn = 1 AND grade_date >= NOW() - INTERVAL '7 days'
         ORDER BY
-            grade_date DESC, dba ASC
-        LIMIT %s;
+            grade_date DESC, dba ASC;
     """
     
     try:
         with DatabaseConnection() as conn:
             conn.row_factory = dict_row
             with conn.cursor() as cursor:
-                cursor.execute(query, (limit,))
+                # The 'limit' parameter is no longer needed for this query.
+                cursor.execute(query)
                 results = cursor.fetchall()
             
             if not results:
                 return jsonify([])
+
+            # This shaping logic remains the same and is still correct.
             shaped_results = []
             for row in results:
                 inspection_data = {
@@ -267,21 +265,14 @@ def get_recently_graded():
                     'grade': row.get('grade'),
                     'inspection_type': row.get('inspection_type'),
                     'action': row.get('action'),
-                    'violations': [] # Violations aren't needed for this view, so an empty array is fine.
+                    'violations': []
                 }
-
-                # 2. Create the main restaurant object, copying all top-level fields
                 restaurant_data = dict(row)
-
-                # 3. Nest the inspection data
                 restaurant_data['inspections'] = [inspection_data]
-
-                # 4. Clean up by removing the keys that are now nested
                 inspection_keys_to_remove = ['critical_flag', 'grade', 'inspection_type', 'action', 'violation_code', 'violation_description']
                 for key in inspection_keys_to_remove:
                     if key in restaurant_data:
                         del restaurant_data[key]
-                
                 shaped_results.append(restaurant_data)
 
             return jsonify(shaped_results)
