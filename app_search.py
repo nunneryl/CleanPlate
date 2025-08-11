@@ -185,27 +185,49 @@ def search():
 
 @app.route('/lists/recently-graded', methods=['GET'])
 def get_recently_graded():
+    """
+    Gets a list of unique restaurants based on their single most recent inspection,
+    ensuring the grade from that specific inspection is returned.
+    This version uses a single, more efficient query to prevent data ambiguity on the client.
+    """
     logger.info("Request received for /lists/recently-graded")
     limit = int(request.args.get('limit', 100, type=int))
-    id_fetch_query = "WITH latest_graded_per_restaurant AS (SELECT DISTINCT ON (camis) camis, dba, grade_date FROM restaurants WHERE grade IN ('A', 'B', 'C', 'Z', 'P') AND grade_date IS NOT NULL ORDER BY camis, grade_date DESC) SELECT camis FROM latest_graded_per_restaurant ORDER BY grade_date DESC, dba ASC LIMIT %s;"
+
+    query = """
+        WITH latest_inspections_per_restaurant AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER(PARTITION BY camis ORDER BY inspection_date DESC) as rn
+            FROM
+                restaurants
+        )
+        SELECT
+            camis, dba, boro, building, street, zipcode, phone, cuisine_description,
+            grade, grade_date, inspection_date, action, google_place_id, website
+        FROM
+            latest_inspections_per_restaurant
+        WHERE
+            rn = 1 AND grade_date IS NOT NULL
+        ORDER BY
+            grade_date DESC, dba ASC
+        LIMIT %s;
+    """
+    
     try:
         with DatabaseConnection() as conn:
-            conn.row_factory = dict_row
+            conn.row_factory = dict_row 
             with conn.cursor() as cursor:
-                cursor.execute(id_fetch_query, (limit,))
-                top_camis_tuples = cursor.fetchall()
-            if not top_camis_tuples:
+                cursor.execute(query, (limit,))
+                results = cursor.fetchall()
+            
+            if not results:
                 return jsonify([])
-            top_camis_list = [item['camis'] for item in top_camis_tuples]
-            details_query = "SELECT r.*, v.violation_code, v.violation_description FROM restaurants r LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date WHERE r.camis = ANY(%s) ORDER BY r.camis, r.inspection_date DESC;"
-            with conn.cursor() as details_cursor:
-                details_cursor.execute(details_query, (top_camis_list,))
-                all_rows = details_cursor.fetchall()
+                
+            return jsonify(results)
+            
     except Exception as e:
         logger.error(f"DB query failed for recently-graded list: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
-    final_results = _group_and_shape_results(all_rows, top_camis_list)
-    return jsonify(final_results)
 
 @app.route('/report-issue', methods=['POST'])
 def report_issue():
