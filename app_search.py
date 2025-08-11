@@ -186,24 +186,23 @@ def search():
 @app.route('/lists/recently-graded', methods=['GET'])
 def get_recently_graded():
     """
-    Gets a list of unique restaurants based on their single most recent inspection,
-    ensuring the grade from that specific inspection is returned.
-    This version uses a single, more efficient query to prevent data ambiguity on the client.
+    Gets a list of unique restaurants based on their single most recent inspection.
+    This final version fetches data efficiently AND shapes it into the nested format
+    the iOS client expects ([Restaurant] with a nested [Inspection] array).
     """
     logger.info("Request received for /lists/recently-graded")
     limit = int(request.args.get('limit', 100, type=int))
-
+    
+    # This efficient query remains the same.
     query = """
         WITH latest_inspections_per_restaurant AS (
             SELECT
-                *,
-                ROW_NUMBER() OVER(PARTITION BY camis ORDER BY inspection_date DESC) as rn
+                r.*,
+                ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn
             FROM
-                restaurants
+                restaurants r
         )
-        SELECT
-            camis, dba, boro, building, street, zipcode, phone, cuisine_description,
-            grade, grade_date, inspection_date, action, google_place_id, website
+        SELECT *
         FROM
             latest_inspections_per_restaurant
         WHERE
@@ -215,15 +214,39 @@ def get_recently_graded():
     
     try:
         with DatabaseConnection() as conn:
-            conn.row_factory = dict_row 
+            conn.row_factory = dict_row
             with conn.cursor() as cursor:
                 cursor.execute(query, (limit,))
                 results = cursor.fetchall()
             
             if not results:
                 return jsonify([])
+            shaped_results = []
+            for row in results:
+                inspection_data = {
+                    'inspection_date': row.get('inspection_date').isoformat() if row.get('inspection_date') else None,
+                    'critical_flag': row.get('critical_flag'),
+                    'grade': row.get('grade'),
+                    'inspection_type': row.get('inspection_type'),
+                    'action': row.get('action'),
+                    'violations': [] # Violations aren't needed for this view, so an empty array is fine.
+                }
+
+                # 2. Create the main restaurant object, copying all top-level fields
+                restaurant_data = dict(row)
+
+                # 3. Nest the inspection data
+                restaurant_data['inspections'] = [inspection_data]
+
+                # 4. Clean up by removing the keys that are now nested
+                inspection_keys_to_remove = ['critical_flag', 'grade', 'inspection_type', 'action', 'violation_code', 'violation_description']
+                for key in inspection_keys_to_remove:
+                    if key in restaurant_data:
+                        del restaurant_data[key]
                 
-            return jsonify(results)
+                shaped_results.append(restaurant_data)
+
+            return jsonify(shaped_results)
             
     except Exception as e:
         logger.error(f"DB query failed for recently-graded list: {e}", exc_info=True)
