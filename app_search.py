@@ -323,10 +323,7 @@ def create_user():
     if not token:
         return jsonify({"error": "identityToken is required"}), 400
 
-    # For now, we will decode the token without verification to get the user's ID.
-    # In a future step, we will add full verification against Apple's public keys.
     try:
-        # The 'sub' (subject) claim in the token is Apple's unique ID for the user.
         unverified_payload = jwt.decode(token, options={"verify_signature": False})
         user_id = unverified_payload.get('sub')
         if not user_id:
@@ -335,9 +332,6 @@ def create_user():
         logger.error(f"Failed to decode JWT: {e}")
         return jsonify({"error": "Invalid token format"}), 400
 
-    # Insert the new user into the database.
-    # "ON CONFLICT (id) DO NOTHING" is a safe way to handle cases where the user
-    # already exists, preventing errors.
     insert_query = """
         INSERT INTO users (id) VALUES (%s)
         ON CONFLICT (id) DO NOTHING;
@@ -354,6 +348,58 @@ def create_user():
 
     except Exception as e:
         logger.error(f"Failed to insert user into database: {e}", exc_info=True)
+        return jsonify({"error": "Database operation failed"}), 500
+        
+@app.route('/favorites', methods=['POST'])
+def add_favorite():
+    """
+    Adds a restaurant to the logged-in user's favorites list.
+    Authenticates the user via their Apple identityToken.
+    """
+    # 1. Get the Apple identity token from the request headers
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return jsonify({"error": "Authorization token is required"}), 401
+    
+    token = auth_header.split(' ')[1]
+
+    # 2. Get the restaurant CAMIS from the request body
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+    
+    data = request.get_json()
+    camis = data.get('camis')
+
+    if not camis:
+        return jsonify({"error": "Restaurant 'camis' is required"}), 400
+
+    # 3. Decode the token to get the user's ID (same logic as create_user)
+    try:
+        unverified_payload = jwt.decode(token, options={"verify_signature": False})
+        user_id = unverified_payload.get('sub')
+        if not user_id:
+            return jsonify({"error": "Invalid token payload"}), 401
+    except jwt.PyJWTError as e:
+        logger.error(f"Failed to decode JWT for add_favorite: {e}")
+        return jsonify({"error": "Invalid or expired token"}), 401
+
+    # 4. Insert the favorite into the database
+    insert_query = """
+        INSERT INTO favorites (user_id, restaurant_camis) VALUES (%s, %s)
+        ON CONFLICT (user_id, restaurant_camis) DO NOTHING;
+    """
+
+    try:
+        with DatabaseConnection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(insert_query, (user_id, camis))
+            conn.commit()
+        
+        logger.info(f"User {user_id} favorited restaurant {camis}")
+        return jsonify({"status": "success", "message": "Favorite added."}), 201
+
+    except Exception as e:
+        logger.error(f"Failed to insert favorite for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
 
 @app.errorhandler(404)
