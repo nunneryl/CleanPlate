@@ -402,6 +402,102 @@ def add_favorite():
         logger.error(f"Failed to insert favorite for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
 
+@app.route('/favorites', methods=['GET'])
+def get_favorites():
+    """
+    Retrieves the full restaurant details for the logged-in user's favorites.
+    Authenticates the user via their Apple identityToken.
+    """
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return jsonify({"error": "Authorization token is required"}), 401
+    
+    token = auth_header.split(' ')[1]
+
+    try:
+        unverified_payload = jwt.decode(token, options={"verify_signature": False})
+        user_id = unverified_payload.get('sub')
+        if not user_id:
+            return jsonify({"error": "Invalid token payload"}), 401
+    except jwt.PyJWTError as e:
+        logger.error(f"Failed to decode JWT for get_favorites: {e}")
+        return jsonify({"error": "Invalid or expired token"}), 401
+
+    # This query joins the favorites table with the latest inspection data
+    # for each favorited restaurant.
+    query = """
+        WITH latest_inspections AS (
+            SELECT DISTINCT ON (camis) *
+            FROM restaurants
+            ORDER BY camis, inspection_date DESC
+        )
+        SELECT li.*
+        FROM latest_inspections li
+        JOIN favorites f ON li.camis = f.restaurant_camis
+        WHERE f.user_id = %s;
+    """
+
+    try:
+        with DatabaseConnection() as conn:
+            conn.row_factory = dict_row
+            with conn.cursor() as cursor:
+                cursor.execute(query, (user_id,))
+                # We need to shape this data just like we did for the recently-graded list
+                results = cursor.fetchall()
+                shaped_results = []
+                for row in results:
+                    restaurant_data = dict(row)
+                    restaurant_data['inspections'] = [{
+                        'inspection_date': row.get('inspection_date').isoformat() if row.get('inspection_date') else None,
+                        'grade': row.get('grade'),
+                        'action': row.get('action'),
+                        'critical_flag': row.get('critical_flag'),
+                        'inspection_type': row.get('inspection_type'),
+                        'violations': []
+                    }]
+                    shaped_results.append(restaurant_data)
+
+        return jsonify(shaped_results)
+    except Exception as e:
+        logger.error(f"Failed to fetch favorites for user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Database operation failed"}), 500
+
+
+@app.route('/favorites/<string:camis>', methods=['DELETE'])
+def remove_favorite(camis):
+    """
+    Removes a restaurant from the logged-in user's favorites list.
+    Authenticates the user via their Apple identityToken.
+    """
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return jsonify({"error": "Authorization token is required"}), 401
+    
+    token = auth_header.split(' ')[1]
+
+    try:
+        unverified_payload = jwt.decode(token, options={"verify_signature": False})
+        user_id = unverified_payload.get('sub')
+        if not user_id:
+            return jsonify({"error": "Invalid token payload"}), 401
+    except jwt.PyJWTError as e:
+        logger.error(f"Failed to decode JWT for remove_favorite: {e}")
+        return jsonify({"error": "Invalid or expired token"}), 401
+
+    delete_query = "DELETE FROM favorites WHERE user_id = %s AND restaurant_camis = %s;"
+
+    try:
+        with DatabaseConnection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(delete_query, (user_id, camis))
+            conn.commit()
+        
+        logger.info(f"User {user_id} unfavorited restaurant {camis}")
+        return jsonify({"status": "success", "message": "Favorite removed."}), 200
+    except Exception as e:
+        logger.error(f"Failed to delete favorite for user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Database operation failed"}), 500
+
 @app.errorhandler(404)
 def not_found_error_handler(error):
     return jsonify({"error": "Endpoint not found"}), 404
