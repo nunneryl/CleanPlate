@@ -11,6 +11,7 @@ from psycopg.rows import dict_row
 import smtplib
 import ssl
 from email.message import EmailMessage
+import jwt
 
 from db_manager import DatabaseConnection
 from utils import normalize_search_term_for_hybrid
@@ -306,6 +307,54 @@ def trigger_update():
         return jsonify({"status": "error", "message": "Unauthorized."}), 403
     threading.Thread(target=run_database_update, args=(15,), daemon=True).start()
     return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
+    
+@app.route('/users', methods=['POST'])
+def create_user():
+    """
+    Receives an identity token from a "Sign in with Apple" client,
+    verifies it (placeholder), and creates a new user in the database.
+    """
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+    
+    data = request.get_json()
+    token = data.get('identityToken')
+
+    if not token:
+        return jsonify({"error": "identityToken is required"}), 400
+
+    # For now, we will decode the token without verification to get the user's ID.
+    # In a future step, we will add full verification against Apple's public keys.
+    try:
+        # The 'sub' (subject) claim in the token is Apple's unique ID for the user.
+        unverified_payload = jwt.decode(token, options={"verify_signature": False})
+        user_id = unverified_payload.get('sub')
+        if not user_id:
+            return jsonify({"error": "Invalid token payload"}), 400
+    except jwt.PyJWTError as e:
+        logger.error(f"Failed to decode JWT: {e}")
+        return jsonify({"error": "Invalid token format"}), 400
+
+    # Insert the new user into the database.
+    # "ON CONFLICT (id) DO NOTHING" is a safe way to handle cases where the user
+    # already exists, preventing errors.
+    insert_query = """
+        INSERT INTO users (id) VALUES (%s)
+        ON CONFLICT (id) DO NOTHING;
+    """
+
+    try:
+        with DatabaseConnection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(insert_query, (user_id,))
+            conn.commit() # Important: commit the transaction to save the new user
+        
+        logger.info(f"User upserted successfully for sub: {user_id}")
+        return jsonify({"status": "success", "message": "User created or already exists."}), 201
+
+    except Exception as e:
+        logger.error(f"Failed to insert user into database: {e}", exc_info=True)
+        return jsonify({"error": "Database operation failed"}), 500
 
 @app.errorhandler(404)
 def not_found_error_handler(error):
