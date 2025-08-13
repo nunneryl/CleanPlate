@@ -402,11 +402,13 @@ def add_favorite():
         logger.error(f"Failed to insert favorite for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
 
+# In file: app_search.py
+
 @app.route('/favorites', methods=['GET'])
 def get_favorites():
     """
-    Retrieves the full restaurant details for the logged-in user's favorites.
-    Authenticates the user via their Apple identityToken.
+    Retrieves the full restaurant details and complete inspection history
+    for the logged-in user's favorites.
     """
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Bearer '):
@@ -423,18 +425,11 @@ def get_favorites():
         logger.error(f"Failed to decode JWT for get_favorites: {e}")
         return jsonify({"error": "Invalid or expired token"}), 401
 
-    # This query joins the favorites table with the latest inspection data
-    # for each favorited restaurant.
     query = """
-        WITH latest_inspections AS (
-            SELECT DISTINCT ON (camis) *
-            FROM restaurants
-            ORDER BY camis, inspection_date DESC
-        )
-        SELECT li.*
-        FROM latest_inspections li
-        JOIN favorites f ON li.camis = f.restaurant_camis
-        WHERE f.user_id = %s;
+        SELECT r.*, v.violation_code, v.violation_description 
+        FROM restaurants r 
+        LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date 
+        WHERE r.camis IN (SELECT restaurant_camis FROM favorites WHERE user_id = %s)
     """
 
     try:
@@ -442,22 +437,18 @@ def get_favorites():
             conn.row_factory = dict_row
             with conn.cursor() as cursor:
                 cursor.execute(query, (user_id,))
-                # We need to shape this data just like we did for the recently-graded list
-                results = cursor.fetchall()
-                shaped_results = []
-                for row in results:
-                    restaurant_data = dict(row)
-                    restaurant_data['inspections'] = [{
-                        'inspection_date': row.get('inspection_date').isoformat() if row.get('inspection_date') else None,
-                        'grade': row.get('grade'),
-                        'action': row.get('action'),
-                        'critical_flag': row.get('critical_flag'),
-                        'inspection_type': row.get('inspection_type'),
-                        'violations': []
-                    }]
-                    shaped_results.append(restaurant_data)
+                all_rows = cursor.fetchall()
 
-        return jsonify(shaped_results)
+            if not all_rows:
+                return jsonify([]) # Return an empty list if no favorites are found
+
+            # Get a unique, ordered list of CAMIS from the results
+            favorited_camis = sorted(list(set([row['camis'] for row in all_rows])))
+            
+            # The existing _group_and_shape_results function is perfect for this
+            final_results = _group_and_shape_results(all_rows, favorited_camis)
+            return jsonify(final_results)
+
     except Exception as e:
         logger.error(f"Failed to fetch favorites for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
