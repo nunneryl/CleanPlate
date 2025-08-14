@@ -488,6 +488,45 @@ def remove_favorite(camis):
     except Exception as e:
         logger.error(f"Failed to delete favorite for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
+        
+@app.route('/users', methods=['DELETE'])
+def delete_user():
+    """
+    Deletes the logged-in user and all their associated data (e.g., favorites)
+    from the database. Authenticates via their Apple identityToken.
+    """
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return jsonify({"error": "Authorization token is required"}), 401
+    
+    token = auth_header.split(' ')[1]
+
+    try:
+        # Decode the token to get the user's unique ID
+        unverified_payload = jwt.decode(token, options={"verify_signature": False})
+        user_id = unverified_payload.get('sub')
+        if not user_id:
+            return jsonify({"error": "Invalid token payload"}), 401
+    except jwt.PyJWTError as e:
+        logger.error(f"Failed to decode JWT for delete_user: {e}")
+        return jsonify({"error": "Invalid or expired token"}), 401
+
+    # The ON DELETE CASCADE rule in our 'favorites' table means that
+    # deleting the user here will automatically delete all their favorites.
+    delete_query = "DELETE FROM users WHERE id = %s;"
+
+    try:
+        with DatabaseConnection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(delete_query, (user_id,))
+            conn.commit()
+        
+        logger.info(f"User {user_id} and all associated data have been deleted.")
+        return jsonify({"status": "success", "message": "User deleted successfully."}), 200
+
+    except Exception as e:
+        logger.error(f"Failed to delete user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Database operation failed"}), 500
 
 @app.errorhandler(404)
 def not_found_error_handler(error):
