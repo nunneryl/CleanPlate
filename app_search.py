@@ -308,122 +308,82 @@ def trigger_update():
     threading.Thread(target=run_database_update, args=(15,), daemon=True).start()
     return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
     
+def _get_user_id_from_token(request):
+    """
+    Extracts, decodes, and validates an Apple identity token from the request.
+    Returns the user_id on success, or a Flask Response object on failure.
+    """
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return None, jsonify({"error": "Authorization token is required"}), 401
+    
+    token = auth_header.split(' ')[1]
+
+    try:
+        # The 'sub' (subject) claim in the token is Apple's unique ID for the user.
+        unverified_payload = jwt.decode(token, options={"verify_signature": False})
+        user_id = unverified_payload.get('sub')
+        if not user_id:
+            return None, jsonify({"error": "Invalid token payload"}), 401
+        return user_id, None, None
+    except jwt.PyJWTError as e:
+        logger.error(f"Failed to decode JWT: {e}")
+        return None, jsonify({"error": "Invalid or expired token"}), 401
+
 @app.route('/users', methods=['POST'])
 def create_user():
-    """
-    Receives an identity token from a "Sign in with Apple" client,
-    verifies it (placeholder), and creates a new user in the database.
-    """
-    if not request.is_json:
-        return jsonify({"error": "Request must be JSON"}), 400
-    
+    # Note: create_user gets the token from the body, unlike other requests.
+    if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
     data = request.get_json()
     token = data.get('identityToken')
-
-    if not token:
-        return jsonify({"error": "identityToken is required"}), 400
+    if not token: return jsonify({"error": "identityToken is required"}), 400
 
     try:
         unverified_payload = jwt.decode(token, options={"verify_signature": False})
         user_id = unverified_payload.get('sub')
-        if not user_id:
-            return jsonify({"error": "Invalid token payload"}), 400
+        if not user_id: return jsonify({"error": "Invalid token payload"}), 400
     except jwt.PyJWTError as e:
         logger.error(f"Failed to decode JWT: {e}")
         return jsonify({"error": "Invalid token format"}), 400
 
-    insert_query = """
-        INSERT INTO users (id) VALUES (%s)
-        ON CONFLICT (id) DO NOTHING;
-    """
-
+    insert_query = "INSERT INTO users (id) VALUES (%s) ON CONFLICT (id) DO NOTHING;"
     try:
         with DatabaseConnection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(insert_query, (user_id,))
-            conn.commit() # Important: commit the transaction to save the new user
-        
+            conn.commit()
         logger.info(f"User upserted successfully for sub: {user_id}")
         return jsonify({"status": "success", "message": "User created or already exists."}), 201
-
     except Exception as e:
         logger.error(f"Failed to insert user into database: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
-        
+
 @app.route('/favorites', methods=['POST'])
 def add_favorite():
-    """
-    Adds a restaurant to the logged-in user's favorites list.
-    Authenticates the user via their Apple identityToken.
-    """
-    # 1. Get the Apple identity token from the request headers
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return jsonify({"error": "Authorization token is required"}), 401
-    
-    token = auth_header.split(' ')[1]
+    user_id, error_response, status_code = _get_user_id_from_token(request)
+    if error_response: return error_response, status_code
 
-    # 2. Get the restaurant CAMIS from the request body
-    if not request.is_json:
-        return jsonify({"error": "Request must be JSON"}), 400
-    
+    if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
     data = request.get_json()
     camis = data.get('camis')
+    if not camis: return jsonify({"error": "Restaurant 'camis' is required"}), 400
 
-    if not camis:
-        return jsonify({"error": "Restaurant 'camis' is required"}), 400
-
-    # 3. Decode the token to get the user's ID (same logic as create_user)
-    try:
-        unverified_payload = jwt.decode(token, options={"verify_signature": False})
-        user_id = unverified_payload.get('sub')
-        if not user_id:
-            return jsonify({"error": "Invalid token payload"}), 401
-    except jwt.PyJWTError as e:
-        logger.error(f"Failed to decode JWT for add_favorite: {e}")
-        return jsonify({"error": "Invalid or expired token"}), 401
-
-    # 4. Insert the favorite into the database
-    insert_query = """
-        INSERT INTO favorites (user_id, restaurant_camis) VALUES (%s, %s)
-        ON CONFLICT (user_id, restaurant_camis) DO NOTHING;
-    """
-
+    insert_query = "INSERT INTO favorites (user_id, restaurant_camis) VALUES (%s, %s) ON CONFLICT (user_id, restaurant_camis) DO NOTHING;"
     try:
         with DatabaseConnection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(insert_query, (user_id, camis))
             conn.commit()
-        
         logger.info(f"User {user_id} favorited restaurant {camis}")
         return jsonify({"status": "success", "message": "Favorite added."}), 201
-
     except Exception as e:
         logger.error(f"Failed to insert favorite for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
 
-# In file: app_search.py
-
 @app.route('/favorites', methods=['GET'])
 def get_favorites():
-    """
-    Retrieves the full restaurant details and complete inspection history
-    for the logged-in user's favorites.
-    """
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return jsonify({"error": "Authorization token is required"}), 401
-    
-    token = auth_header.split(' ')[1]
-
-    try:
-        unverified_payload = jwt.decode(token, options={"verify_signature": False})
-        user_id = unverified_payload.get('sub')
-        if not user_id:
-            return jsonify({"error": "Invalid token payload"}), 401
-    except jwt.PyJWTError as e:
-        logger.error(f"Failed to decode JWT for get_favorites: {e}")
-        return jsonify({"error": "Invalid or expired token"}), 401
+    user_id, error_response, status_code = _get_user_id_from_token(request)
+    if error_response: return error_response, status_code
 
     query = """
         SELECT r.*, v.violation_code, v.violation_description 
@@ -431,99 +391,50 @@ def get_favorites():
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date 
         WHERE r.camis IN (SELECT restaurant_camis FROM favorites WHERE user_id = %s)
     """
-
     try:
         with DatabaseConnection() as conn:
             conn.row_factory = dict_row
             with conn.cursor() as cursor:
                 cursor.execute(query, (user_id,))
                 all_rows = cursor.fetchall()
-
-            if not all_rows:
-                return jsonify([]) # Return an empty list if no favorites are found
-
-            # Get a unique, ordered list of CAMIS from the results
+            if not all_rows: return jsonify([])
             favorited_camis = sorted(list(set([row['camis'] for row in all_rows])))
-            
-            # The existing _group_and_shape_results function is perfect for this
             final_results = _group_and_shape_results(all_rows, favorited_camis)
             return jsonify(final_results)
-
     except Exception as e:
         logger.error(f"Failed to fetch favorites for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
 
-
 @app.route('/favorites/<string:camis>', methods=['DELETE'])
 def remove_favorite(camis):
-    """
-    Removes a restaurant from the logged-in user's favorites list.
-    Authenticates the user via their Apple identityToken.
-    """
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return jsonify({"error": "Authorization token is required"}), 401
-    
-    token = auth_header.split(' ')[1]
-
-    try:
-        unverified_payload = jwt.decode(token, options={"verify_signature": False})
-        user_id = unverified_payload.get('sub')
-        if not user_id:
-            return jsonify({"error": "Invalid token payload"}), 401
-    except jwt.PyJWTError as e:
-        logger.error(f"Failed to decode JWT for remove_favorite: {e}")
-        return jsonify({"error": "Invalid or expired token"}), 401
+    user_id, error_response, status_code = _get_user_id_from_token(request)
+    if error_response: return error_response, status_code
 
     delete_query = "DELETE FROM favorites WHERE user_id = %s AND restaurant_camis = %s;"
-
     try:
         with DatabaseConnection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(delete_query, (user_id, camis))
             conn.commit()
-        
         logger.info(f"User {user_id} unfavorited restaurant {camis}")
         return jsonify({"status": "success", "message": "Favorite removed."}), 200
     except Exception as e:
         logger.error(f"Failed to delete favorite for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
-        
+
 @app.route('/users', methods=['DELETE'])
 def delete_user():
-    """
-    Deletes the logged-in user and all their associated data (e.g., favorites)
-    from the database. Authenticates via their Apple identityToken.
-    """
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return jsonify({"error": "Authorization token is required"}), 401
-    
-    token = auth_header.split(' ')[1]
+    user_id, error_response, status_code = _get_user_id_from_token(request)
+    if error_response: return error_response, status_code
 
-    try:
-        # Decode the token to get the user's unique ID
-        unverified_payload = jwt.decode(token, options={"verify_signature": False})
-        user_id = unverified_payload.get('sub')
-        if not user_id:
-            return jsonify({"error": "Invalid token payload"}), 401
-    except jwt.PyJWTError as e:
-        logger.error(f"Failed to decode JWT for delete_user: {e}")
-        return jsonify({"error": "Invalid or expired token"}), 401
-
-    # The ON DELETE CASCADE rule in our 'favorites' table means that
-    # deleting the user here will automatically delete all their favorites.
     delete_query = "DELETE FROM users WHERE id = %s;"
-
     try:
         with DatabaseConnection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(delete_query, (user_id,))
             conn.commit()
-        
         logger.info(f"User {user_id} and all associated data have been deleted.")
         return jsonify({"status": "success", "message": "User deleted successfully."}), 200
-
     except Exception as e:
         logger.error(f"Failed to delete user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
