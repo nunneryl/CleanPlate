@@ -59,6 +59,35 @@ def _group_and_shape_results(all_rows, ordered_camis):
         final_results.append(base_info)
     return final_results
 
+def _shape_simple_restaurant_list(rows):
+    """
+    A simplified shaper for endpoints that return a list of restaurants
+    with only their single latest inspection.
+    """
+    shaped_results = []
+    for row in rows:
+        inspection_data = {
+            'inspection_date': row.get('inspection_date').isoformat() if row.get('inspection_date') else None,
+            'critical_flag': row.get('critical_flag'),
+            'grade': row.get('grade'),
+            'inspection_type': row.get('inspection_type'),
+            'action': row.get('action'),
+            'violations': [] # This list is intentionally empty for performance
+        }
+        restaurant_data = dict(row)
+        restaurant_data['inspections'] = [inspection_data]
+        
+        # Clean up top-level keys that are now nested in 'inspections'
+        inspection_keys_to_remove = [
+            'critical_flag', 'grade', 'inspection_type', 'action',
+            'violation_code', 'violation_description', 'rn'
+        ]
+        for key in inspection_keys_to_remove:
+            if key in restaurant_data:
+                del restaurant_data[key]
+        shaped_results.append(restaurant_data)
+    return shaped_results
+
 def send_report_email(report_data):
     sender_email = os.environ.get("SENDER_EMAIL")
     receiver_email = os.environ.get("RECEIVER_EMAIL")
@@ -106,7 +135,6 @@ def search():
 
     normalized_search = normalize_search_term_for_hybrid(search_term)
     
-    # --- MODIFIED LOGIC FOR FILTERS ---
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
     params = [f"%{normalized_search}%", normalized_search]
 
@@ -129,7 +157,6 @@ def search():
         params.append(f"%{cuisine_filter}%")
         
     where_clause = " AND ".join(where_conditions)
-    # --- END MODIFIED LOGIC ---
 
     order_by_clause = ""
     order_by_params = []
@@ -145,9 +172,6 @@ def search():
         order_by_clause = "ORDER BY CASE WHEN dba_normalized_search = %s THEN 0 WHEN dba_normalized_search ILIKE %s THEN 1 ELSE 2 END, similarity(dba_normalized_search, %s) DESC, length(dba_normalized_search)"
         order_by_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
-    # --- REWRITTEN QUERY TO FIX FILTER BUG ---
-    # This query now correctly finds the latest inspection for each restaurant first,
-    # and only then applies the filters to that latest record.
     id_fetch_query = f"""
         WITH latest_restaurants AS (
             SELECT DISTINCT ON (camis) *
@@ -162,7 +186,6 @@ def search():
     """
     offset = (page - 1) * per_page
     id_fetch_params = tuple(params + order_by_params + [per_page, offset])
-    # --- END REWRITTEN QUERY ---
 
     try:
         with DatabaseConnection() as conn:
@@ -215,71 +238,121 @@ def get_restaurant_by_camis(camis):
         logger.error(f"DB query failed for CAMIS '{camis}': {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
-    # We can reuse your existing helper function to shape the data perfectly.
     final_results = _group_and_shape_results(all_rows, [camis])
     if not final_results:
         return jsonify({"error": "Failed to shape restaurant data"}), 500
 
-    return jsonify(final_results[0]) # Return the single restaurant object, not a list
+    return jsonify(final_results[0])
 
+# --- MODIFICATION START: Updated Recently Graded Logic ---
 @app.route('/lists/recently-graded', methods=['GET'])
 def get_recently_graded():
     """
-    Gets a list of unique restaurants based on their single most recent inspection
-    within the last 7 days.
+    Gets restaurants with recent grade activity. This includes:
+    1. Restaurants with any new grade assigned in the last 7 days.
+    2. Restaurants whose grade was updated from 'Pending' to a final grade
+       (A, B, C) in the last 7 days.
     """
     logger.info("Request received for /lists/recently-graded")
+    
     query = """
-        WITH latest_inspections_per_restaurant AS (
+        WITH ranked_inspections AS (
             SELECT
                 r.*,
                 ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn
             FROM
                 restaurants r
+        ),
+        latest_inspections AS (
+            SELECT * FROM ranked_inspections WHERE rn = 1
+        ),
+        previous_inspections AS (
+            SELECT camis, grade FROM ranked_inspections WHERE rn = 2
         )
-        SELECT *
-        FROM
-            latest_inspections_per_restaurant
+        SELECT li.*
+        FROM latest_inspections li
+        LEFT JOIN previous_inspections pi ON li.camis = pi.camis
         WHERE
-            rn = 1 AND grade_date >= NOW() - INTERVAL '7 days'
-        ORDER BY
-            grade_date DESC, dba ASC;
+            -- Condition 1: Any restaurant whose latest grade was issued in the last 7 days.
+            -- This covers newly opened places, regular new inspections, AND stale-to-fresh updates.
+            li.grade_date >= NOW() - INTERVAL '7 days' OR
+            
+            -- Condition 2: A restaurant's latest grade is a final one (A,B,C), was graded in the last 7 days,
+            -- AND its immediately preceding grade was 'Pending' (P or Z). This explicitly catches
+            -- the stale-to-fresh scenario.
+            (li.grade IN ('A', 'B', 'C') AND li.grade_date >= NOW() - INTERVAL '7 days' AND pi.grade IN ('P', 'Z'))
+            
+        ORDER BY li.grade_date DESC, li.dba ASC;
     """
     
     try:
         with DatabaseConnection() as conn:
             conn.row_factory = dict_row
             with conn.cursor() as cursor:
-                # The 'limit' parameter is no longer needed for this query.
                 cursor.execute(query)
                 results = cursor.fetchall()
             
             if not results:
                 return jsonify([])
 
-            # This shaping logic remains the same and is still correct.
-            shaped_results = []
-            for row in results:
-                inspection_data = {
-                    'inspection_date': row.get('inspection_date').isoformat() if row.get('inspection_date') else None,
-                    'critical_flag': row.get('critical_flag'),
-                    'grade': row.get('grade'),
-                    'inspection_type': row.get('inspection_type'),
-                    'action': row.get('action'),
-                    'violations': []
-                }
-                restaurant_data = dict(row)
-                restaurant_data['inspections'] = [inspection_data]
-                inspection_keys_to_remove = ['critical_flag', 'grade', 'inspection_type', 'action', 'violation_code', 'violation_description']
-                for key in inspection_keys_to_remove:
-                    if key in restaurant_data:
-                        del restaurant_data[key]
-                shaped_results.append(restaurant_data)
-
+            shaped_results = _shape_simple_restaurant_list(results)
             return jsonify(shaped_results)
             
     except Exception as e:
         logger.error(f"DB query failed for recently-graded list: {e}", exc_info=True)
+        return jsonify({"error": "Database query failed"}), 500
+
+@app.route('/lists/recent-actions', methods=['GET'])
+def get_recent_actions():
+    """
+    Gets lists of restaurants that have been recently closed or re-opened
+    by the DOHMH within the last 7 days.
+    """
+    logger.info("Request received for /lists/recent-actions")
+    query = """
+        WITH latest_inspections AS (
+            SELECT
+                r.*,
+                ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn
+            FROM
+                restaurants r
+            WHERE
+                -- Pre-filter to reduce the work for the window function
+                r.inspection_date >= NOW() - INTERVAL '7 days'
+        )
+        SELECT *
+        FROM
+            latest_inspections
+        WHERE
+            rn = 1 AND (action ILIKE '%%closed%%' OR action ILIKE '%%re-opened%%')
+        ORDER BY
+            inspection_date DESC, dba ASC;
+    """
+    try:
+        with DatabaseConnection() as conn:
+            conn.row_factory = dict_row
+            with conn.cursor() as cursor:
+                cursor.execute(query)
+                results = cursor.fetchall()
+
+            if not results:
+                return jsonify({"recently_closed": [], "recently_reopened": []})
+            
+            # Separate the results into two lists based on the 'action' text
+            closed_rows = [row for row in results if 'closed' in row.get('action', '').lower()]
+            reopened_rows = [row for row in results if 're-opened' in row.get('action', '').lower()]
+
+            # Shape each list for the API response
+            shaped_closed = _shape_simple_restaurant_list(closed_rows)
+            shaped_reopened = _shape_simple_restaurant_list(reopened_rows)
+
+            return jsonify({
+                "recently_closed": shaped_closed,
+                "recently_reopened": shaped_reopened
+            })
+
+    except Exception as e:
+        logger.error(f"DB query failed for recent-actions list: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
 @app.route('/report-issue', methods=['POST'])
@@ -320,7 +393,6 @@ def _get_user_id_from_token(request):
     token = auth_header.split(' ')[1]
 
     try:
-        # The 'sub' (subject) claim in the token is Apple's unique ID for the user.
         unverified_payload = jwt.decode(token, options={"verify_signature": False})
         user_id = unverified_payload.get('sub')
         if not user_id:
@@ -332,7 +404,6 @@ def _get_user_id_from_token(request):
 
 @app.route('/users', methods=['POST'])
 def create_user():
-    # Note: create_user gets the token from the body, unlike other requests.
     if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
     data = request.get_json()
     token = data.get('identityToken')
