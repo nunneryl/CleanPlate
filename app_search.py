@@ -59,6 +59,34 @@ def _group_and_shape_results(all_rows, ordered_camis):
         final_results.append(base_info)
     return final_results
 
+def _shape_simple_restaurant_list(rows):
+    """
+    A simplified shaper for endpoints that return a list of restaurants
+    with only their single latest inspection.
+    """
+    shaped_results = []
+    for row in rows:
+        inspection_data = {
+            'inspection_date': row.get('inspection_date').isoformat() if row.get('inspection_date') else None,
+            'critical_flag': row.get('critical_flag'),
+            'grade': row.get('grade'),
+            'inspection_type': row.get('inspection_type'),
+            'action': row.get('action'),
+            'violations': [] # This list is intentionally empty for performance
+        }
+        restaurant_data = dict(row)
+        restaurant_data['inspections'] = [inspection_data]
+        
+        inspection_keys_to_remove = [
+            'critical_flag', 'grade', 'inspection_type', 'action',
+            'violation_code', 'violation_description', 'rn'
+        ]
+        for key in inspection_keys_to_remove:
+            if key in restaurant_data:
+                del restaurant_data[key]
+        shaped_results.append(restaurant_data)
+    return shaped_results
+
 def send_report_email(report_data):
     sender_email = os.environ.get("SENDER_EMAIL")
     receiver_email = os.environ.get("RECEIVER_EMAIL")
@@ -106,7 +134,6 @@ def search():
 
     normalized_search = normalize_search_term_for_hybrid(search_term)
     
-    # --- MODIFIED LOGIC FOR FILTERS ---
     where_conditions = ["(dba_normalized_search ILIKE %s OR similarity(dba_normalized_search, %s) > 0.4)"]
     params = [f"%{normalized_search}%", normalized_search]
 
@@ -129,7 +156,6 @@ def search():
         params.append(f"%{cuisine_filter}%")
         
     where_clause = " AND ".join(where_conditions)
-    # --- END MODIFIED LOGIC ---
 
     order_by_clause = ""
     order_by_params = []
@@ -145,9 +171,6 @@ def search():
         order_by_clause = "ORDER BY CASE WHEN dba_normalized_search = %s THEN 0 WHEN dba_normalized_search ILIKE %s THEN 1 ELSE 2 END, similarity(dba_normalized_search, %s) DESC, length(dba_normalized_search)"
         order_by_params = [normalized_search, f"{normalized_search}%", normalized_search]
 
-    # --- REWRITTEN QUERY TO FIX FILTER BUG ---
-    # This query now correctly finds the latest inspection for each restaurant first,
-    # and only then applies the filters to that latest record.
     id_fetch_query = f"""
         WITH latest_restaurants AS (
             SELECT DISTINCT ON (camis) *
@@ -162,7 +185,6 @@ def search():
     """
     offset = (page - 1) * per_page
     id_fetch_params = tuple(params + order_by_params + [per_page, offset])
-    # --- END REWRITTEN QUERY ---
 
     try:
         with DatabaseConnection() as conn:
@@ -186,14 +208,8 @@ def search():
 
 @app.route('/restaurant/<string:camis>', methods=['GET'])
 def get_restaurant_by_camis(camis):
-    """
-    Fetches the full details and entire inspection history for a single
-    restaurant identified by its CAMIS.
-    """
     if not camis.isdigit():
         return jsonify({"error": "Invalid CAMIS format"}), 400
-
-    logger.info(f"Request received for full details of CAMIS: {camis}")
     
     try:
         with DatabaseConnection() as conn:
@@ -215,81 +231,104 @@ def get_restaurant_by_camis(camis):
         logger.error(f"DB query failed for CAMIS '{camis}': {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
-    # We can reuse your existing helper function to shape the data perfectly.
     final_results = _group_and_shape_results(all_rows, [camis])
     if not final_results:
         return jsonify({"error": "Failed to shape restaurant data"}), 500
 
-    return jsonify(final_results[0]) # Return the single restaurant object, not a list
+    return jsonify(final_results[0])
 
 @app.route('/lists/recently-graded', methods=['GET'])
 def get_recently_graded():
-    """
-    Gets a list of unique restaurants based on their single most recent inspection
-    within the last 7 days.
-    """
-    logger.info("Request received for /lists/recently-graded")
     query = """
-        WITH latest_inspections_per_restaurant AS (
+        WITH ranked_inspections AS (
             SELECT
                 r.*,
                 ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn
             FROM
                 restaurants r
+        ),
+        latest_inspections AS (
+            SELECT * FROM ranked_inspections WHERE rn = 1
+        ),
+        previous_inspections AS (
+            SELECT camis, grade FROM ranked_inspections WHERE rn = 2
         )
-        SELECT *
-        FROM
-            latest_inspections_per_restaurant
+        SELECT li.*
+        FROM latest_inspections li
+        LEFT JOIN previous_inspections pi ON li.camis = pi.camis
         WHERE
-            rn = 1 AND grade_date >= NOW() - INTERVAL '7 days'
-        ORDER BY
-            grade_date DESC, dba ASC;
+            li.grade_date >= NOW() - INTERVAL '7 days' OR
+            (li.grade IN ('A', 'B', 'C') AND li.grade_date >= NOW() - INTERVAL '7 days' AND pi.grade IN ('P', 'Z'))
+        ORDER BY li.grade_date DESC, li.dba ASC;
     """
     
     try:
         with DatabaseConnection() as conn:
             conn.row_factory = dict_row
             with conn.cursor() as cursor:
-                # The 'limit' parameter is no longer needed for this query.
                 cursor.execute(query)
                 results = cursor.fetchall()
             
-            if not results:
-                return jsonify([])
-
-            # This shaping logic remains the same and is still correct.
-            shaped_results = []
-            for row in results:
-                inspection_data = {
-                    'inspection_date': row.get('inspection_date').isoformat() if row.get('inspection_date') else None,
-                    'critical_flag': row.get('critical_flag'),
-                    'grade': row.get('grade'),
-                    'inspection_type': row.get('inspection_type'),
-                    'action': row.get('action'),
-                    'violations': []
-                }
-                restaurant_data = dict(row)
-                restaurant_data['inspections'] = [inspection_data]
-                inspection_keys_to_remove = ['critical_flag', 'grade', 'inspection_type', 'action', 'violation_code', 'violation_description']
-                for key in inspection_keys_to_remove:
-                    if key in restaurant_data:
-                        del restaurant_data[key]
-                shaped_results.append(restaurant_data)
-
+            if not results: return jsonify([])
+            shaped_results = _shape_simple_restaurant_list(results)
             return jsonify(shaped_results)
             
     except Exception as e:
         logger.error(f"DB query failed for recently-graded list: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
+@app.route('/lists/recent-actions', methods=['GET'])
+def get_recent_actions():
+    query = """
+        WITH latest_inspections AS (
+            SELECT
+                r.*,
+                ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn
+            FROM
+                restaurants r
+            WHERE
+                r.inspection_date >= NOW() - INTERVAL '7 days'
+        )
+        SELECT *
+        FROM
+            latest_inspections
+        WHERE
+            rn = 1 AND (action ILIKE '%%closed%%' OR action ILIKE '%%re-opened%%')
+        ORDER BY
+            inspection_date DESC, dba ASC;
+    """
+    try:
+        with DatabaseConnection() as conn:
+            conn.row_factory = dict_row
+            with conn.cursor() as cursor:
+                cursor.execute(query)
+                results = cursor.fetchall()
+
+            if not results:
+                return jsonify({"recently_closed": [], "recently_reopened": []})
+            
+            closed_rows = [row for row in results if 'closed' in row.get('action', '').lower()]
+            reopened_rows = [row for row in results if 're-opened' in row.get('action', '').lower()]
+
+            shaped_closed = _shape_simple_restaurant_list(closed_rows)
+            shaped_reopened = _shape_simple_restaurant_list(reopened_rows)
+
+            return jsonify({
+                "recently_closed": shaped_closed,
+                "recently_reopened": shaped_reopened
+            })
+
+    except Exception as e:
+        logger.error(f"DB query failed for recent-actions list: {e}", exc_info=True)
+        return jsonify({"error": "Database query failed"}), 500
+
 @app.route('/report-issue', methods=['POST'])
 def report_issue():
-    if not request.is_json:
-        return jsonify({"error": "Request must be JSON"}), 400
+    if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
     data = request.get_json()
     if not all(k in data for k in ["camis", "issue_type", "comments"]):
         return jsonify({"error": "Missing required fields"}), 400
-    logger.info(f"Received issue report: {data}")
+    
     if send_report_email(data):
         return jsonify({"status": "success", "message": "Report received."}), 200
     else:
@@ -301,18 +340,16 @@ def trigger_update():
         from update_database import run_database_update
     except ImportError:
         return jsonify({"status": "error", "message": "Update logic currently unavailable."}), 503
+    
     provided_key = request.headers.get('X-Update-Secret')
     expected_key = APIConfig.UPDATE_SECRET_KEY
     if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
         return jsonify({"status": "error", "message": "Unauthorized."}), 403
+    
     threading.Thread(target=run_database_update, args=(15,), daemon=True).start()
     return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
     
 def _get_user_id_from_token(request):
-    """
-    Extracts, decodes, and validates an Apple identity token from the request.
-    Returns the user_id on success, or a Flask Response object on failure.
-    """
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Bearer '):
         return None, jsonify({"error": "Authorization token is required"}), 401
@@ -320,7 +357,6 @@ def _get_user_id_from_token(request):
     token = auth_header.split(' ')[1]
 
     try:
-        # The 'sub' (subject) claim in the token is Apple's unique ID for the user.
         unverified_payload = jwt.decode(token, options={"verify_signature": False})
         user_id = unverified_payload.get('sub')
         if not user_id:
@@ -332,7 +368,6 @@ def _get_user_id_from_token(request):
 
 @app.route('/users', methods=['POST'])
 def create_user():
-    # Note: create_user gets the token from the body, unlike other requests.
     if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
     data = request.get_json()
     token = data.get('identityToken')
@@ -352,7 +387,6 @@ def create_user():
             with conn.cursor() as cursor:
                 cursor.execute(insert_query, (user_id,))
             conn.commit()
-        logger.info(f"User upserted successfully for sub: {user_id}")
         return jsonify({"status": "success", "message": "User created or already exists."}), 201
     except Exception as e:
         logger.error(f"Failed to insert user into database: {e}", exc_info=True)
@@ -374,7 +408,6 @@ def add_favorite():
             with conn.cursor() as cursor:
                 cursor.execute(insert_query, (user_id, camis))
             conn.commit()
-        logger.info(f"User {user_id} favorited restaurant {camis}")
         return jsonify({"status": "success", "message": "Favorite added."}), 201
     except Exception as e:
         logger.error(f"Failed to insert favorite for user {user_id}: {e}", exc_info=True)
@@ -416,7 +449,6 @@ def remove_favorite(camis):
             with conn.cursor() as cursor:
                 cursor.execute(delete_query, (user_id, camis))
             conn.commit()
-        logger.info(f"User {user_id} unfavorited restaurant {camis}")
         return jsonify({"status": "success", "message": "Favorite removed."}), 200
     except Exception as e:
         logger.error(f"Failed to delete favorite for user {user_id}: {e}", exc_info=True)
@@ -437,6 +469,86 @@ def delete_user():
         return jsonify({"status": "success", "message": "User deleted successfully."}), 200
     except Exception as e:
         logger.error(f"Failed to delete user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Database operation failed"}), 500
+
+@app.route('/recent-searches', methods=['POST'])
+def save_recent_search():
+    user_id, error_response, status_code = _get_user_id_from_token(request)
+    if error_response: return error_response, status_code
+
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+    data = request.get_json()
+    search_term = data.get('search_term')
+    if not search_term or not search_term.strip():
+        return jsonify({"error": "search_term is required and cannot be empty"}), 400
+    
+    search_term_display = search_term.strip()
+    search_term_normalized = search_term_display.lower()
+
+    upsert_query = """
+        INSERT INTO recent_searches (user_id, search_term_display, search_term_normalized)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (user_id, search_term_normalized)
+        DO UPDATE SET
+            created_at = NOW(),
+            search_term_display = EXCLUDED.search_term_display;
+    """
+    
+    try:
+        with DatabaseConnection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(upsert_query, (user_id, search_term_display, search_term_normalized))
+            conn.commit()
+        logger.info(f"User {user_id} saved or updated search term: '{search_term_display}'")
+        return jsonify({"status": "success", "message": "Search saved."}), 201
+    except Exception as e:
+        logger.error(f"Failed to save recent search for user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Database operation failed"}), 500
+
+@app.route('/recent-searches', methods=['GET'])
+def get_recent_searches():
+    user_id, error_response, status_code = _get_user_id_from_token(request)
+    if error_response: return error_response, status_code
+
+    query = """
+        SELECT id, search_term_display, created_at
+        FROM recent_searches
+        WHERE user_id = %s
+        ORDER BY created_at DESC
+        LIMIT 10;
+    """
+
+    try:
+        with DatabaseConnection() as conn:
+            conn.row_factory = dict_row
+            with conn.cursor() as cursor:
+                cursor.execute(query, (user_id,))
+                results = cursor.fetchall()
+            
+            for item in results:
+                item['created_at'] = item['created_at'].isoformat()
+            
+            return jsonify(results)
+    except Exception as e:
+        logger.error(f"Failed to fetch recent searches for user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Database operation failed"}), 500
+
+@app.route('/recent-searches', methods=['DELETE'])
+def delete_recent_searches():
+    user_id, error_response, status_code = _get_user_id_from_token(request)
+    if error_response: return error_response, status_code
+
+    delete_query = "DELETE FROM recent_searches WHERE user_id = %s;"
+    try:
+        with DatabaseConnection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(delete_query, (user_id,))
+            conn.commit()
+        logger.info(f"Cleared recent searches for user {user_id}")
+        return jsonify({"status": "success", "message": "Recent searches cleared."}), 200
+    except Exception as e:
+        logger.error(f"Failed to delete recent searches for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
 
 @app.errorhandler(404)
