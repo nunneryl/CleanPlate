@@ -465,12 +465,12 @@ def delete_user():
             with conn.cursor() as cursor:
                 cursor.execute(delete_query, (user_id,))
             conn.commit()
+        logger.info(f"User {user_id} and all associated data have been deleted.")
         return jsonify({"status": "success", "message": "User deleted successfully."}), 200
     except Exception as e:
         logger.error(f"Failed to delete user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
 
-# --- NEW ENDPOINTS FOR RECENT SEARCHES ---
 @app.route('/recent-searches', methods=['POST'])
 def save_recent_search():
     user_id, error_response, status_code = _get_user_id_from_token(request)
@@ -483,11 +483,9 @@ def save_recent_search():
     if not search_term or not search_term.strip():
         return jsonify({"error": "search_term is required and cannot be empty"}), 400
     
-    # Normalize the search term for the unique key, but keep the original for display
     search_term_display = search_term.strip()
     search_term_normalized = search_term_display.lower()
 
-    # This query will insert a new search, or update the timestamp if it already exists
     upsert_query = """
         INSERT INTO recent_searches (user_id, search_term_display, search_term_normalized)
         VALUES (%s, %s, %s)
@@ -513,7 +511,6 @@ def get_recent_searches():
     user_id, error_response, status_code = _get_user_id_from_token(request)
     if error_response: return error_response, status_code
 
-    # Fetch the 10 most recent searches for the user
     query = """
         SELECT id, search_term_display, created_at
         FROM recent_searches
@@ -529,13 +526,29 @@ def get_recent_searches():
                 cursor.execute(query, (user_id,))
                 results = cursor.fetchall()
             
-            # Convert datetime objects to ISO 8601 strings for JSON compatibility
             for item in results:
                 item['created_at'] = item['created_at'].isoformat()
             
             return jsonify(results)
     except Exception as e:
         logger.error(f"Failed to fetch recent searches for user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Database operation failed"}), 500
+
+@app.route('/recent-searches', methods=['DELETE'])
+def delete_recent_searches():
+    user_id, error_response, status_code = _get_user_id_from_token(request)
+    if error_response: return error_response, status_code
+
+    delete_query = "DELETE FROM recent_searches WHERE user_id = %s;"
+    try:
+        with DatabaseConnection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(delete_query, (user_id,))
+            conn.commit()
+        logger.info(f"Cleared recent searches for user {user_id}")
+        return jsonify({"status": "success", "message": "Recent searches cleared."}), 200
+    except Exception as e:
+        logger.error(f"Failed to delete recent searches for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
 
 @app.errorhandler(404)
