@@ -79,7 +79,6 @@ def update_database_batch(data):
     restaurants_to_insert = []
     violations_to_insert = []
     
-    # ---List to hold grade update events ---
     grade_updates_to_insert = []
 
     with DatabaseConnection() as conn, conn.cursor() as cursor:
@@ -87,9 +86,7 @@ def update_database_batch(data):
             camis, inspection_date = key
             new_grade = inspection["details"].get("grade")
 
-            # --- NEW: Logic to check for stale-to-fresh updates ---
             if new_grade and new_grade in FINAL_GRADES:
-                # Query for the previous most recent grade
                 cursor.execute(
                     "SELECT grade FROM restaurants WHERE camis = %s ORDER BY inspection_date DESC LIMIT 1",
                     (camis,)
@@ -100,7 +97,6 @@ def update_database_batch(data):
                 if previous_grade and previous_grade in PENDING_GRADES:
                     logger.info(f"Grade Update DETECTED for CAMIS {camis}: {previous_grade} -> {new_grade}")
                     grade_updates_to_insert.append((camis, previous_grade, new_grade))
-            # --- END NEW ---
 
             has_final_grade = next((v for v in inspection["violations"] if v.get("grade") and v.get("grade") in ['A', 'B', 'C']), None)
             has_any_action = next((v for v in inspection["violations"] if v.get("action")), None)
@@ -156,14 +152,12 @@ def update_database_batch(data):
             v_count = cursor.rowcount
             logger.info(f"Violation insert executed. Affected rows: {v_count}")
         
-        # --- NEW: Insert any detected grade updates ---
         if grade_updates_to_insert:
             logger.info(f"Executing batch insert for {len(grade_updates_to_insert)} grade updates...")
             update_sql = "INSERT INTO grade_updates (restaurant_camis, previous_grade, new_grade) VALUES (%s, %s, %s);"
             cursor.executemany(update_sql, grade_updates_to_insert)
             u_count = cursor.rowcount
             logger.info(f"Grade updates insert executed. Affected rows: {u_count}")
-        # --- END NEW ---
 
         conn.commit()
         logger.info("DB transaction explicitly committed.")
