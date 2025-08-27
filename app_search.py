@@ -276,6 +276,62 @@ def get_recently_graded():
     except Exception as e:
         logger.error(f"DB query failed for recently-graded list: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
+        
+@app.route('/lists/grade-updates', methods=['GET'])
+def get_grade_updates():
+    """
+    Fetches restaurants that have recently had their grade updated from
+    'Pending' to a final letter grade.
+    """
+    query = """
+        WITH latest_updates AS (
+            -- Get the most recent grade update for each restaurant in the last 14 days
+            SELECT
+                DISTINCT ON (restaurant_camis)
+                restaurant_camis,
+                update_date
+            FROM
+                grade_updates
+            WHERE
+                update_date >= NOW() - INTERVAL '14 days'
+            ORDER BY
+                restaurant_camis, update_date DESC
+        ),
+        latest_inspections AS (
+            -- Get the single most recent inspection record for each of those restaurants
+            SELECT
+                DISTINCT ON (r.camis)
+                r.*
+            FROM
+                restaurants r
+            INNER JOIN
+                latest_updates lu ON r.camis = lu.restaurant_camis
+            ORDER BY
+                r.camis, r.inspection_date DESC
+        )
+        -- Select all fields from the latest inspection records, ordered by when the grade was updated
+        SELECT li.*
+        FROM latest_inspections li
+        INNER JOIN latest_updates lu ON li.camis = lu.restaurant_camis
+        ORDER BY lu.update_date DESC;
+    """
+    try:
+        with DatabaseConnection() as conn:
+            conn.row_factory = dict_row
+            with conn.cursor() as cursor:
+                cursor.execute(query)
+                results = cursor.fetchall()
+            
+            if not results:
+                return jsonify([])
+            
+            shaped_results = _shape_simple_restaurant_list(results)
+            return jsonify(shaped_results)
+            
+    except Exception as e:
+        logger.error(f"DB query failed for grade-updates list: {e}", exc_info=True)
+        return jsonify({"error": "Database query failed"}), 500
+# --- END NEW ---
 
 @app.route('/lists/recent-actions', methods=['GET'])
 def get_recent_actions():
