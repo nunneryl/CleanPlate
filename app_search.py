@@ -237,44 +237,82 @@ def get_restaurant_by_camis(camis):
 
     return jsonify(final_results[0])
 
-@app.route('/lists/recently-graded', methods=['GET'])
-def get_recently_graded():
-    query = """
-        WITH ranked_inspections AS (
-            SELECT
-                r.*,
-                ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn
-            FROM
-                restaurants r
-        ),
-        latest_inspections AS (
-            SELECT * FROM ranked_inspections WHERE rn = 1
-        ),
-        previous_inspections AS (
-            SELECT camis, grade FROM ranked_inspections WHERE rn = 2
-        )
-        SELECT li.*
-        FROM latest_inspections li
-        LEFT JOIN previous_inspections pi ON li.camis = pi.camis
-        WHERE
-            li.grade_date >= NOW() - INTERVAL '7 days' OR
-            (li.grade IN ('A', 'B', 'C') AND li.grade_date >= NOW() - INTERVAL '7 days' AND pi.grade IN ('P', 'Z'))
-        ORDER BY li.grade_date DESC, li.dba ASC;
+# --- NEW: A single, unified endpoint for all recent grade activity ---
+@app.route('/lists/recent-activity', methods=['GET'])
+def get_recent_activity():
     """
-    
+    Fetches a combined list of recently graded and recently finalized restaurants.
+    - "new_grade" items are restaurants with a grade_date in the last 7 days.
+    - "finalized" items are restaurants from the grade_updates table in the last 14 days.
+    The combined list is sorted by the most recent activity date.
+    """
+    query = """
+    WITH recent_grades AS (
+        -- Select restaurants with a grade date in the last 7 days
+        SELECT
+            camis,
+            grade_date AS activity_date,
+            'new_grade' AS update_type
+        FROM restaurants
+        WHERE grade_date >= NOW() - INTERVAL '7 days'
+    ),
+    finalized_grades AS (
+        -- Select restaurants with a finalized grade in the last 14 days
+        SELECT
+            restaurant_camis AS camis,
+            update_date AS activity_date,
+            'finalized' AS update_type
+        FROM grade_updates
+        WHERE update_date >= NOW() - INTERVAL '14 days'
+    ),
+    combined_activity AS (
+        -- Combine both sets and get only the most recent activity for each restaurant
+        SELECT
+            DISTINCT ON (camis)
+            camis,
+            activity_date,
+            update_type
+        FROM (
+            SELECT * FROM recent_grades
+            UNION ALL
+            SELECT * FROM finalized_grades
+        ) AS all_activity
+        ORDER BY camis, activity_date DESC
+    ),
+    latest_inspections AS (
+        -- Get the full, most recent inspection record for each restaurant in our combined list
+        SELECT
+            DISTINCT ON (r.camis)
+            r.*,
+            ca.activity_date,
+            ca.update_type
+        FROM
+            restaurants r
+        INNER JOIN
+            combined_activity ca ON r.camis = ca.camis
+        ORDER BY
+            r.camis, r.inspection_date DESC
+    )
+    -- Select all fields and sort the final result by the activity date
+    SELECT *
+    FROM latest_inspections
+    ORDER BY activity_date DESC;
+    """
     try:
         with DatabaseConnection() as conn:
             conn.row_factory = dict_row
             with conn.cursor() as cursor:
                 cursor.execute(query)
                 results = cursor.fetchall()
+
+            if not results:
+                return jsonify([])
             
-            if not results: return jsonify([])
             shaped_results = _shape_simple_restaurant_list(results)
             return jsonify(shaped_results)
             
     except Exception as e:
-        logger.error(f"DB query failed for recently-graded list: {e}", exc_info=True)
+        logger.error(f"DB query failed for recent-activity list: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
         
 @app.route('/lists/grade-updates', methods=['GET'])
