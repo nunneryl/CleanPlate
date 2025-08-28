@@ -1,3 +1,5 @@
+# In file: update_database.py
+
 import logging
 import argparse
 from utils import normalize_search_term_for_hybrid
@@ -15,6 +17,8 @@ NOT_CRITICAL_FLAG = 'Not Critical'
 NOT_APPLICABLE = 'N/A'
 NYC_API_BASE_URL = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
 API_RECORD_LIMIT = 500000
+PENDING_GRADES = {'P', 'Z', 'N'}
+FINAL_GRADES = {'A', 'B', 'C'}
 
 # --- Logger Setup ---
 logger = logging.getLogger(__name__)
@@ -57,7 +61,7 @@ def fetch_data(days_back=3):
         return []
 
 def update_database_batch(data):
-    if not data: return 0, 0
+    if not data: return 0, 0, 0
     
     inspections_data = {}
     for item in data:
@@ -74,38 +78,53 @@ def update_database_batch(data):
 
     restaurants_to_insert = []
     violations_to_insert = []
+    
+    grade_updates_to_insert = []
 
-    for key, inspection in inspections_data.items():
-        camis, inspection_date = key
-
-        has_final_grade = next((v for v in inspection["violations"] if v.get("grade") and v.get("grade") in ['A', 'B', 'C']), None)
-        has_any_action = next((v for v in inspection["violations"] if v.get("action")), None)
-        details_item = has_final_grade or has_any_action or inspection["details"]
-
-        dba = details_item.get("dba")
-        normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
-        
-        is_critical = any(v.get("critical_flag") == CRITICAL_FLAG for v in inspection["violations"])
-        critical_flag_for_inspection = CRITICAL_FLAG if is_critical else NOT_CRITICAL_FLAG
-
-        restaurants_to_insert.append((
-            camis, dba, normalized_dba,
-            details_item.get("boro"), details_item.get("building"), details_item.get("street"),
-            details_item.get("zipcode"), details_item.get("phone"),
-            _to_float_or_none(details_item.get("latitude")),
-            _to_float_or_none(details_item.get("longitude")),
-            details_item.get("grade"), inspection_date, critical_flag_for_inspection,
-            details_item.get("inspection_type"), details_item.get("cuisine_description"),
-            convert_date(details_item.get("grade_date")),
-            details_item.get("action")
-        ))
-        
-        for v_item in inspection["violations"]:
-            if v_item.get("violation_code"):
-                violations_to_insert.append((camis, inspection_date, v_item.get("violation_code"), v_item.get("violation_description")))
-
-    r_count, v_count = 0, 0
     with DatabaseConnection() as conn, conn.cursor() as cursor:
+        for key, inspection in inspections_data.items():
+            camis, inspection_date = key
+            new_grade = inspection["details"].get("grade")
+
+            if new_grade and new_grade in FINAL_GRADES:
+                cursor.execute(
+                    "SELECT grade FROM restaurants WHERE camis = %s ORDER BY inspection_date DESC LIMIT 1",
+                    (camis,)
+                )
+                result = cursor.fetchone()
+                previous_grade = result[0] if result else None
+
+                if previous_grade and previous_grade in PENDING_GRADES:
+                    logger.info(f"Grade Update DETECTED for CAMIS {camis}: {previous_grade} -> {new_grade}")
+                    grade_updates_to_insert.append((camis, previous_grade, new_grade))
+
+            has_final_grade = next((v for v in inspection["violations"] if v.get("grade") and v.get("grade") in ['A', 'B', 'C']), None)
+            has_any_action = next((v for v in inspection["violations"] if v.get("action")), None)
+            details_item = has_final_grade or has_any_action or inspection["details"]
+
+            dba = details_item.get("dba")
+            normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
+            
+            is_critical = any(v.get("critical_flag") == CRITICAL_FLAG for v in inspection["violations"])
+            critical_flag_for_inspection = CRITICAL_FLAG if is_critical else NOT_CRITICAL_FLAG
+
+            restaurants_to_insert.append((
+                camis, dba, normalized_dba,
+                details_item.get("boro"), details_item.get("building"), details_item.get("street"),
+                details_item.get("zipcode"), details_item.get("phone"),
+                _to_float_or_none(details_item.get("latitude")),
+                _to_float_or_none(details_item.get("longitude")),
+                details_item.get("grade"), inspection_date, critical_flag_for_inspection,
+                details_item.get("inspection_type"), details_item.get("cuisine_description"),
+                convert_date(details_item.get("grade_date")),
+                details_item.get("action")
+            ))
+            
+            for v_item in inspection["violations"]:
+                if v_item.get("violation_code"):
+                    violations_to_insert.append((camis, inspection_date, v_item.get("violation_code"), v_item.get("violation_description")))
+
+        r_count, v_count, u_count = 0, 0, 0
         if restaurants_to_insert:
             logger.info(f"Executing batch insert for {len(restaurants_to_insert)} unique restaurant inspections...")
             upsert_sql = """
@@ -132,16 +151,24 @@ def update_database_batch(data):
             cursor.executemany(insert_sql, unique_violations)
             v_count = cursor.rowcount
             logger.info(f"Violation insert executed. Affected rows: {v_count}")
+        
+        if grade_updates_to_insert:
+            logger.info(f"Executing batch insert for {len(grade_updates_to_insert)} grade updates...")
+            update_sql = "INSERT INTO grade_updates (restaurant_camis, previous_grade, new_grade) VALUES (%s, %s, %s);"
+            cursor.executemany(update_sql, grade_updates_to_insert)
+            u_count = cursor.rowcount
+            logger.info(f"Grade updates insert executed. Affected rows: {u_count}")
+
         conn.commit()
         logger.info("DB transaction explicitly committed.")
-    return r_count, v_count
+    return r_count, v_count, u_count
 
 def run_database_update(days_back=3):
     logger.info(f"Starting DB update (days_back={days_back})")
     data = fetch_data(days_back)
     if data:
-        r_upd, v_ins = update_database_batch(data)
-        logger.info(f"Update complete. Restaurants processed: {r_upd}, Violations: {v_ins}")
+        r_upd, v_ins, u_ins = update_database_batch(data)
+        logger.info(f"Update complete. Restaurants: {r_upd}, Violations: {v_ins}, Grade Updates: {u_ins}")
     else:
         logger.warning("No data from API.")
     logger.info("DB update finished.")
