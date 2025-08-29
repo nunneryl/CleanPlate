@@ -81,20 +81,24 @@ def update_database_batch(data):
     grade_updates_to_insert = []
 
     with DatabaseConnection() as conn, conn.cursor() as cursor:
-        if inspections_data:
-            keys_to_check = list(inspections_data.keys())
-            query = "SELECT camis, inspection_date, grade FROM restaurants WHERE (camis, inspection_date) = ANY(%s);"
-            cursor.execute(query, (keys_to_check,))
-            existing_grades = {(row[0], row[1].date()): row[2] for row in cursor.fetchall()}
+        # --- NEW LOGIC: Loop through each new inspection and check its status individually ---
+        logger.info(f"Checking {len(inspections_data)} new inspections against the database...")
+        for key, inspection in inspections_data.items():
+            camis, inspection_date = key
+            new_grade = inspection["details"].get("grade")
             
-            for key, inspection in inspections_data.items():
-                camis, inspection_date = key
-                new_grade = inspection["details"].get("grade")
-                previous_grade = existing_grades.get(key)
-                
-                if previous_grade in PENDING_GRADES and new_grade in FINAL_GRADES:
-                    logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {previous_grade or 'NULL'} -> {new_grade}")
-                    grade_updates_to_insert.append((camis, previous_grade, new_grade, 'finalized'))
+            # Query for the grade of this specific inspection in our database
+            cursor.execute(
+                "SELECT grade FROM restaurants WHERE camis = %s AND inspection_date = %s",
+                (camis, inspection_date)
+            )
+            result = cursor.fetchone()
+            previous_grade = result[0] if result else None
+
+            if previous_grade in PENDING_GRADES and new_grade in FINAL_GRADES:
+                logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {previous_grade or 'NULL'} -> {new_grade}")
+                grade_updates_to_insert.append((camis, previous_grade, new_grade, 'finalized'))
+        # --- END NEW LOGIC ---
 
         for key, inspection in inspections_data.items():
             camis, inspection_date = key
