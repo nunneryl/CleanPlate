@@ -80,13 +80,9 @@ def update_database_batch(data):
     violations_to_insert = []
     grade_updates_to_insert = []
 
-   with DatabaseConnection() as conn, conn.cursor() as cursor:
-        # --- NEW LOGIC: Check for in-place updates BEFORE upserting ---
+    with DatabaseConnection() as conn, conn.cursor() as cursor:
         if inspections_data:
-            # Create a list of (camis, inspection_date) tuples to check against our DB
             keys_to_check = list(inspections_data.keys())
-            
-            # Fetch the current grades for these inspections from our database
             query = "SELECT camis, inspection_date, grade FROM restaurants WHERE (camis, inspection_date) = ANY(%s);"
             cursor.execute(query, (keys_to_check,))
             existing_grades = {(row[0], row[1].date()): row[2] for row in cursor.fetchall()}
@@ -94,11 +90,8 @@ def update_database_batch(data):
             for key, inspection in inspections_data.items():
                 camis, inspection_date = key
                 new_grade = inspection["details"].get("grade")
-                
-                # Get the grade we currently have on file for this exact inspection
                 previous_grade = existing_grades.get(key)
                 
-                # Check for the specific transitions you requested
                 if previous_grade in PENDING_GRADES and new_grade in FINAL_GRADES:
                     logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {previous_grade or 'NULL'} -> {new_grade}")
                     grade_updates_to_insert.append((camis, previous_grade, new_grade, 'finalized'))
@@ -124,7 +117,6 @@ def update_database_batch(data):
 
         r_count, v_count, u_count = 0, 0, 0
         if restaurants_to_insert:
-            # (Database insert logic for restaurants remains the same)
             upsert_sql = """
                 INSERT INTO restaurants (camis, dba, dba_normalized_search, boro, building, street, zipcode, phone, latitude, longitude, grade, inspection_date, critical_flag, inspection_type, cuisine_description, grade_date, action)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
@@ -133,14 +125,12 @@ def update_database_batch(data):
             cursor.executemany(upsert_sql, restaurants_to_insert)
             r_count = cursor.rowcount
         if violations_to_insert:
-            # (Database insert logic for violations remains the same)
             unique_violations = list(set(violations_to_insert))
             insert_sql = "INSERT INTO violations (camis, inspection_date, violation_code, violation_description) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING;"
             cursor.executemany(insert_sql, unique_violations)
             v_count = cursor.rowcount
         
         if grade_updates_to_insert:
-            # (Database insert logic for grade_updates is now updated)
             update_sql = "INSERT INTO grade_updates (restaurant_camis, previous_grade, new_grade, update_type) VALUES (%s, %s, %s, %s);"
             cursor.executemany(update_sql, grade_updates_to_insert)
             u_count = cursor.rowcount
@@ -149,7 +139,6 @@ def update_database_batch(data):
         conn.commit()
     return r_count, v_count, u_count
 
-# ... (rest of the file, like run_database_update and the main block, remains the same) ...
 def run_database_update(days_back=3):
     logger.info(f"Starting DB update (days_back={days_back})")
     data = fetch_data(days_back)
