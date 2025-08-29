@@ -80,38 +80,29 @@ def update_database_batch(data):
     violations_to_insert = []
     grade_updates_to_insert = []
 
-    with DatabaseConnection() as conn, conn.cursor() as cursor:
-        unique_new_inspections = {key[0]: inspection["details"] for key, inspection in inspections_data.items()}
-
-        for camis, details in unique_new_inspections.items():
-            # Get the new data from the incoming record
-            new_grade = details.get("grade")
-            new_action = details.get("action", "").lower()
-
-            # Get the most recent previous state from the database
-            cursor.execute(
-                "SELECT grade, action FROM restaurants WHERE camis = %s ORDER BY inspection_date DESC LIMIT 1",
-                (camis,)
-            )
-            result = cursor.fetchone()
-            previous_grade, previous_action = (result[0], result[1].lower() if result[1] else "") if result else (None, "")
+   with DatabaseConnection() as conn, conn.cursor() as cursor:
+        # --- NEW LOGIC: Check for in-place updates BEFORE upserting ---
+        if inspections_data:
+            # Create a list of (camis, inspection_date) tuples to check against our DB
+            keys_to_check = list(inspections_data.keys())
             
-            update_type = None
-            # --- NEW: Comprehensive event detection logic ---
-            if previous_grade in PENDING_GRADES and new_grade in FINAL_GRADES:
-                update_type = 'finalized'
-            elif previous_grade in FINAL_GRADES and new_grade in FINAL_GRADES and previous_grade != new_grade:
-                update_type = 'regraded'
-            elif "closed" in new_action and "closed" not in previous_action:
-                update_type = 'closed'
-            elif previous_grade in FINAL_GRADES and new_grade in PENDING_GRADES:
-                update_type = 'new_inspection'
+            # Fetch the current grades for these inspections from our database
+            query = "SELECT camis, inspection_date, grade FROM restaurants WHERE (camis, inspection_date) = ANY(%s);"
+            cursor.execute(query, (keys_to_check,))
+            existing_grades = {(row[0], row[1].date()): row[2] for row in cursor.fetchall()}
             
-            if update_type:
-                logger.info(f"Event DETECTED for CAMIS {camis}: '{update_type}' ({previous_grade or 'NULL'} -> {new_grade or 'NULL'})")
-                grade_updates_to_insert.append((camis, previous_grade, new_grade, update_type))
+            for key, inspection in inspections_data.items():
+                camis, inspection_date = key
+                new_grade = inspection["details"].get("grade")
+                
+                # Get the grade we currently have on file for this exact inspection
+                previous_grade = existing_grades.get(key)
+                
+                # Check for the specific transitions you requested
+                if previous_grade in PENDING_GRADES and new_grade in FINAL_GRADES:
+                    logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {previous_grade or 'NULL'} -> {new_grade}")
+                    grade_updates_to_insert.append((camis, previous_grade, new_grade, 'finalized'))
 
-        # --- This part of the logic remains largely the same ---
         for key, inspection in inspections_data.items():
             camis, inspection_date = key
             details_item = inspection["details"]
