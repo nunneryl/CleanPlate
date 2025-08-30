@@ -83,7 +83,7 @@ def update_database_batch(data):
 
     with DatabaseConnection() as conn, conn.cursor() as cursor:
         logger.info(f"Checking {len(inspections_data)} new inspections against the database...")
-        # --- NEW LOGIC: Loop through each new inspection and check its status individually ---
+        # --- Loop through each new inspection and check its status individually ---
         for key, inspection in inspections_data.items():
             camis, inspection_date = key
             new_grade = inspection["details"].get("grade")
