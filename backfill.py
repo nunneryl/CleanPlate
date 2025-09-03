@@ -10,7 +10,7 @@ from google_provider import GoogleProvider
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def get_unmatched_restaurants(conn, limit=5000):
+def get_unmatched_restaurants(conn, limit=1000):
     """
     Fetches a limited batch of unique restaurants that have not yet been matched,
     prioritizing the most recently inspected restaurants first.

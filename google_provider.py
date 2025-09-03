@@ -23,13 +23,6 @@ class GoogleProvider:
     def find_place_id(self, name, address):
         """
         Finds the Google Place ID for a given restaurant.
-
-        Args:
-            name (str): The name of the restaurant.
-            address (str): The street address of the restaurant.
-
-        Returns:
-            A tuple containing a status string and the Google Place ID (str) or None.
         """
         endpoint = "/v1/places:searchText"
         url = f"{self.API_HOST}{endpoint}"
@@ -47,17 +40,23 @@ class GoogleProvider:
 
         self.logger.info(f"Querying Google for: {name}")
 
-        # UPDATED: Increased retries and initial delay for more resilience
         retries = 5
         delay = 5
         for i in range(retries):
             try:
-                response = requests.post(url, json=body, headers=headers, timeout=15) # Increased timeout
+                response = requests.post(url, json=body, headers=headers, timeout=15)
                 
-                if response.status_code == 429:
-                    raise requests.exceptions.HTTPError(f"Rate limit exceeded (429)")
+                # --- NEW: Smart error handling ---
+                # Check for permanent client-side errors (4xx) before retrying.
+                if 400 <= response.status_code < 500:
+                    if response.status_code == 403:
+                        self.logger.error(f"Google API request is Forbidden (403). This is a permanent error. Check API key restrictions (IP, Bundle ID) or billing status.")
+                    else:
+                        self.logger.error(f"Google API returned a client error: {response.status_code}. This will not be retried.")
+                    return "failed", None # Fail immediately, do not retry
+                # --- END NEW ---
 
-                response.raise_for_status()
+                response.raise_for_status() # This will trigger the 'except' block for 5xx server errors
                 
                 data = response.json()
                 
@@ -70,10 +69,11 @@ class GoogleProvider:
                     return "no_match", None
 
             except requests.exceptions.RequestException as e:
-                self.logger.warning(f"Google request failed (attempt {i+1}/{retries}): {e}")
+                # This block now only handles transient errors (network issues, 5xx server errors)
+                self.logger.warning(f"Google request failed with a transient error (attempt {i+1}/{retries}): {e}")
                 if i < retries - 1:
                     time.sleep(delay)
-                    delay *= 2 # Exponential backoff continues
+                    delay *= 2
                 else:
                     self.logger.error(f"Google request failed after {retries} retries.")
                     return "failed", None
