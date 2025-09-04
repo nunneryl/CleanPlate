@@ -1,4 +1,4 @@
-# In file: app_search.py
+# In file: app_search.py (Updated with Caching)
 
 import os
 import logging
@@ -6,6 +6,7 @@ import threading
 import secrets
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from flask_caching import Cache # --- CACHE: Import the caching library
 import psycopg
 from psycopg.rows import dict_row
 import smtplib
@@ -22,6 +23,16 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
+
+# --- CACHE: Configure Flask and the caching extension ---
+cache_config = {
+    "CACHE_TYPE": "RedisCache",
+    "CACHE_REDIS_URL": os.environ.get('REDIS_URL'),
+    "CACHE_DEFAULT_TIMEOUT": 300 # Default timeout for cache items in seconds
+}
+app.config.from_mapping(cache_config)
+cache = Cache(app)
+# --- END CACHE CONFIGURATION ---
 
 def _group_and_shape_results(all_rows, ordered_camis):
     if not all_rows:
@@ -120,6 +131,7 @@ def send_report_email(report_data):
         return False
 
 @app.route('/search', methods=['GET'])
+@cache.cached(timeout=3600, query_string=True) # --- CACHE: Cache search results for 1 hour ---
 def search():
     search_term = request.args.get('name', '').strip()
     grade_filter = request.args.get('grade', type=str)
@@ -207,6 +219,7 @@ def search():
     return jsonify(final_results)
 
 @app.route('/restaurant/<string:camis>', methods=['GET'])
+@cache.cached(timeout=3600) # --- CACHE: Cache restaurant details for 1 hour ---
 def get_restaurant_by_camis(camis):
     if not camis.isdigit():
         return jsonify({"error": "Invalid CAMIS format"}), 400
@@ -237,8 +250,8 @@ def get_restaurant_by_camis(camis):
 
     return jsonify(final_results[0])
 
-# --- NEW: A single, unified endpoint for all recent grade activity ---
 @app.route('/lists/recent-activity', methods=['GET'])
+@cache.cached(timeout=43200) # --- CACHE: Cache this list for 12 hours ---
 def get_recent_activity():
     """
     Fetches a combined list of recently graded and recently finalized restaurants.
@@ -369,9 +382,9 @@ def get_grade_updates():
     except Exception as e:
         logger.error(f"DB query failed for grade-updates list: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
-# --- END NEW ---
 
 @app.route('/lists/recent-actions', methods=['GET'])
+@cache.cached(timeout=43200) # --- CACHE: Cache this list for 12 hours ---
 def get_recent_actions():
     query = """
         WITH latest_inspections AS (
@@ -413,7 +426,7 @@ def get_recent_actions():
             })
 
     except Exception as e:
-        logger.error(f"DB query failed for recent-actions list: {e}", exc_info=True)
+        logger.error(f"DB query for recent-actions list failed: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
 @app.route('/report-issue', methods=['POST'])
@@ -495,6 +508,8 @@ def add_favorite():
     data = request.get_json()
     camis = data.get('camis')
     if not camis: return jsonify({"error": "Restaurant 'camis' is required"}), 400
+    
+    cache.delete_memoized(get_favorites) # --- CACHE: Clear user's favorites cache ---
 
     insert_query = "INSERT INTO favorites (user_id, restaurant_camis) VALUES (%s, %s) ON CONFLICT (user_id, restaurant_camis) DO NOTHING;"
     try:
@@ -508,6 +523,7 @@ def add_favorite():
         return jsonify({"error": "Database operation failed"}), 500
 
 @app.route('/favorites', methods=['GET'])
+@cache.memoize(timeout=3600) # --- CACHE: Cache user-specific data ---
 def get_favorites():
     user_id, error_response, status_code = _get_user_id_from_token(request)
     if error_response: return error_response, status_code
@@ -536,6 +552,8 @@ def get_favorites():
 def remove_favorite(camis):
     user_id, error_response, status_code = _get_user_id_from_token(request)
     if error_response: return error_response, status_code
+
+    cache.delete_memoized(get_favorites) # --- CACHE: Clear user's favorites cache ---
 
     delete_query = "DELETE FROM favorites WHERE user_id = %s AND restaurant_camis = %s;"
     try:
