@@ -101,7 +101,7 @@ def update_database_batch(data):
                 previous_grade = result['grade'] # Correctly access the grade by its column name.
                 if previous_grade in PENDING_GRADES and new_grade in FINAL_GRADES:
                     logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {previous_grade or 'NULL'} -> {new_grade}")
-                    grade_updates_to_insert.append((camis, previous_grade, new_grade, 'finalized'))
+                    grade_updates_to_insert.append((camis, previous_grade, new_grade, 'finalized', inspection_date))
 
             details_item = inspection["details"]
             dba = details_item.get("dba")
@@ -136,7 +136,7 @@ def update_database_batch(data):
             v_count = cursor.rowcount
         
         if grade_updates_to_insert:
-            update_sql = "INSERT INTO grade_updates (restaurant_camis, previous_grade, new_grade, update_type) VALUES (%s, %s, %s, %s);"
+            update_sql = "INSERT INTO grade_updates (restaurant_camis, previous_grade, new_grade, update_type, inspection_date) VALUES (%s, %s, %s, %s, %s);"
             cursor.executemany(update_sql, grade_updates_to_insert)
             u_count = cursor.rowcount
             logger.info(f"Grade updates insert executed. Affected rows: {u_count}")
