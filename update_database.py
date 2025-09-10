@@ -44,7 +44,7 @@ def convert_date(date_str):
     except (ValueError, TypeError):
         return None
 
-def fetch_data(days_back=3):
+def fetch_data(days_back=14):
     logger.info(f"Fetching records updated in the last {days_back} days from NYC API...")
     api_params = {
         "$where": f":updated_at >= '{(datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')}T00:00:00.000'",
@@ -81,26 +81,28 @@ def update_database_batch(data):
     violations_to_insert = []
     grade_updates_to_insert = []
 
-    with DatabaseConnection() as conn, conn.cursor() as cursor:
+    # Use a RealDictCursor to ensure rows are returned as dictionaries
+    # This makes the fix explicit and robust.
+    from psycopg.rows import dict_row
+    with DatabaseConnection() as conn, conn.cursor(row_factory=dict_row) as cursor:
         logger.info(f"Checking {len(inspections_data)} new inspections against the database...")
-        # --- Loop through each new inspection and check its status individually ---
         for key, inspection in inspections_data.items():
             camis, inspection_date = key
             new_grade = inspection["details"].get("grade")
             
-            # Query for the grade of this specific inspection in our database
             cursor.execute(
                 "SELECT grade FROM restaurants WHERE camis = %s AND inspection_date = %s",
-                (camis, inspection_date)
+                (camis, str(inspection_date)) # Ensure date is a string for the query
             )
             result = cursor.fetchone()
-            previous_grade = result[0] if result else None
 
-            if previous_grade in PENDING_GRADES and new_grade in FINAL_GRADES:
-                logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {previous_grade or 'NULL'} -> {new_grade}")
-                grade_updates_to_insert.append((camis, previous_grade, new_grade, 'finalized'))
-            
-            # Prepare the restaurant and violation data for insertion/upsert
+            if result:
+                # A record already exists. Check if the grade is being finalized.
+                previous_grade = result['grade'] # Correctly access the grade by its column name.
+                if previous_grade in PENDING_GRADES and new_grade in FINAL_GRADES:
+                    logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {previous_grade or 'NULL'} -> {new_grade}")
+                    grade_updates_to_insert.append((camis, previous_grade, new_grade, 'finalized'))
+
             details_item = inspection["details"]
             dba = details_item.get("dba")
             normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
@@ -142,7 +144,7 @@ def update_database_batch(data):
         conn.commit()
     return r_count, v_count, u_count
 
-def run_database_update(days_back=3):
+def run_database_update(days_back=14):
     logger.info(f"Starting DB update (days_back={days_back})")
     data = fetch_data(days_back)
     if data:
