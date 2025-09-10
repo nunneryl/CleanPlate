@@ -335,75 +335,60 @@ def get_grade_updates():
     'Pending' to a final letter grade.
     """
     query = """
-        WITH latest_updates AS (
-            -- Get the most recent grade update for each restaurant in the last 14 days
+        WITH recent_grades AS (
+            -- Restaurants with a grade_date in the last 7 days. This part is fine.
             SELECT
-                DISTINCT ON (restaurant_camis)
-                restaurant_camis,
-                update_date
+                camis,
+                inspection_date,
+                grade_date AS activity_date
+            FROM restaurants
+            WHERE grade_date >= NOW() - INTERVAL '7 days'
+        ),
+        finalized_grades AS (
+            -- Restaurants with a finalized grade. This is the corrected part.
+            -- We now JOIN to the restaurants table to get the REAL grade_date.
+            SELECT
+                gu.restaurant_camis AS camis,
+                gu.inspection_date,
+                r.grade_date AS activity_date
             FROM
-                grade_updates
+                grade_updates gu
+            JOIN
+                restaurants r ON gu.restaurant_camis = r.camis AND gu.inspection_date = r.inspection_date
             WHERE
-                update_date >= NOW() - INTERVAL '14 days'
-            ORDER BY
-                restaurant_camis, update_date DESC
+                gu.update_date >= NOW() - INTERVAL '14 days'
+        ),
+        combined_activity AS (
+            -- Combine both sets and get the most recent activity for each restaurant
+            SELECT
+                DISTINCT ON (camis)
+                camis,
+                activity_date
+            FROM (
+                SELECT camis, activity_date FROM recent_grades
+                UNION ALL
+                SELECT camis, activity_date FROM finalized_grades
+            ) AS all_activity
+            ORDER BY camis, activity_date DESC
         ),
         latest_inspections AS (
-            -- Get the single most recent inspection record for each of those restaurants
+            -- Get the full, most recent inspection record for each restaurant in our combined list
             SELECT
                 DISTINCT ON (r.camis)
-                r.*
+                r.*,
+                ca.activity_date
             FROM
                 restaurants r
             INNER JOIN
-                latest_updates lu ON r.camis = lu.restaurant_camis
+                combined_activity ca ON r.camis = ca.camis
             ORDER BY
                 r.camis, r.inspection_date DESC
         )
-        -- Select all fields from the latest inspection records, ordered by when the grade was updated
-        SELECT li.*
-        FROM latest_inspections li
-        INNER JOIN latest_updates lu ON li.camis = lu.restaurant_camis
-        ORDER BY lu.update_date DESC;
-    """
-    try:
-        with DatabaseConnection() as conn:
-            conn.row_factory = dict_row
-            with conn.cursor() as cursor:
-                cursor.execute(query)
-                results = cursor.fetchall()
-            
-            if not results:
-                return jsonify([])
-            
-            shaped_results = _shape_simple_restaurant_list(results)
-            return jsonify(shaped_results)
-            
-    except Exception as e:
-        logger.error(f"DB query failed for grade-updates list: {e}", exc_info=True)
-        return jsonify({"error": "Database query failed"}), 500
-
-@app.route('/lists/recent-actions', methods=['GET'])
-@cache.cached(timeout=43200) # --- CACHE: Cache this list for 12 hours ---
-def get_recent_actions():
-    query = """
-        WITH latest_inspections AS (
-            SELECT
-                r.*,
-                ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn
-            FROM
-                restaurants r
-            WHERE
-                r.inspection_date >= NOW() - INTERVAL '7 days'
-        )
+        -- Select all fields and sort the final result by the true activity date
         SELECT *
-        FROM
-            latest_inspections
-        WHERE
-            rn = 1 AND (action ILIKE '%%closed%%' OR action ILIKE '%%re-opened%%')
-        ORDER BY
-            inspection_date DESC, dba ASC;
-    """
+        FROM latest_inspections
+        ORDER BY activity_date DESC;
+        """
     try:
         with DatabaseConnection() as conn:
             conn.row_factory = dict_row
