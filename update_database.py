@@ -131,7 +131,7 @@ def update_database_batch(data):
             r_count = cursor.rowcount
         if violations_to_insert:
             unique_violations = list(set(violations_to_insert))
-            insert_sql = "INSERT INTO violations (camis, inspection_date, violation_code, violation_description) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING;"
+            insert_sql = "INSERT INTO violations (camis, inspection_date, violation_code, violation_description) VALUES (%s, %s, %s, %s) ON CONFLICT (camis, inspection_date, violation_code, violation_description) DO NOTHING;"
             cursor.executemany(insert_sql, unique_violations)
             v_count = cursor.rowcount
         
