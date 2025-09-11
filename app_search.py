@@ -251,22 +251,19 @@ def get_restaurant_by_camis(camis):
     return jsonify(final_results[0])
 
 @app.route('/lists/recent-activity', methods=['GET'])
-@cache.cached(timeout=43200) # --- CACHE: Cache this list for 12 hours ---
+@cache.cached(timeout=43200) # Cache for 12 hours
 def get_recent_activity():
     """
     Fetches a combined list of recently graded and recently finalized restaurants.
-    - "new_grade" items are restaurants with a grade_date in the last 7 days.
-    - "finalized" items are restaurants from the grade_updates table in the last 14 days.
-    The combined list is sorted by the most recent activity date.
     """
-    # FINAL CORRECTED QUERY WITH CAST
     query = """
     WITH recent_grades AS (
         -- Restaurants with a grade_date in the last 7 days.
         SELECT
             camis,
             inspection_date,
-            grade_date AS activity_date
+            grade_date AS activity_date,
+            'new_grade' AS update_type
         FROM restaurants
         WHERE grade_date >= NOW() - INTERVAL '7 days'
     ),
@@ -275,7 +272,8 @@ def get_recent_activity():
         SELECT
             gu.restaurant_camis AS camis,
             gu.inspection_date,
-            r.grade_date AS activity_date
+            r.grade_date AS activity_date,
+            gu.update_type
         FROM
             grade_updates gu
         JOIN
@@ -288,11 +286,12 @@ def get_recent_activity():
         SELECT
             DISTINCT ON (camis)
             camis,
-            activity_date
+            activity_date,
+            update_type
         FROM (
-            SELECT camis, activity_date FROM recent_grades
+            SELECT camis, activity_date, update_type FROM recent_grades
             UNION ALL
-            SELECT camis, activity_date FROM finalized_grades
+            SELECT camis, activity_date, update_type FROM finalized_grades
         ) AS all_activity
         ORDER BY camis, activity_date DESC
     ),
@@ -301,7 +300,8 @@ def get_recent_activity():
         SELECT
             DISTINCT ON (r.camis)
             r.*,
-            ca.activity_date
+            ca.activity_date,
+            ca.update_type
         FROM
             restaurants r
         INNER JOIN
@@ -312,7 +312,8 @@ def get_recent_activity():
     -- Select all fields and sort the final result by the true activity date
     SELECT *
     FROM latest_inspections
-    ORDER BY activity_date DESC;
+    ORDER BY activity_date DESC
+    LIMIT 200;
     """
     try:
         with DatabaseConnection() as conn:
