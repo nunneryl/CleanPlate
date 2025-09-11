@@ -1,4 +1,4 @@
-# In file: update_database.py
+# In file: update_database.py (Fully Corrected and Automated)
 
 import logging
 import argparse
@@ -44,7 +44,7 @@ def convert_date(date_str):
     except (ValueError, TypeError):
         return None
 
-def fetch_data(days_back=14):
+def fetch_data(days_back=3):
     logger.info(f"Fetching records updated in the last {days_back} days from NYC API...")
     api_params = {
         "$where": f":updated_at >= '{(datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')}T00:00:00.000'",
@@ -72,17 +72,21 @@ def update_database_batch(data):
         
         inspection_key = (camis, inspection_date)
         if inspection_key not in inspections_data:
-            inspections_data[inspection_key] = {"details": item, "violations": []}
+            inspections_data[inspection_key] = {"details": item, "violations": {}} # Use a dict for violations to auto-dedupe
         
-        if item.get("violation_code"):
-            inspections_data[inspection_key]["violations"].append(item)
+        # Add violation if it exists and we haven't seen it before for this inspection
+        violation_code = item.get("violation_code")
+        if violation_code:
+            violation_description = item.get("violation_description", "")
+            # Use a tuple of code and description as the key to ensure uniqueness
+            violation_key = (violation_code, violation_description)
+            if violation_key not in inspections_data[inspection_key]["violations"]:
+                inspections_data[inspection_key]["violations"][violation_key] = violation_description
 
     restaurants_to_insert = []
     violations_to_insert = []
     grade_updates_to_insert = []
 
-    # Use a RealDictCursor to ensure rows are returned as dictionaries
-    # This makes the fix explicit and robust.
     from psycopg.rows import dict_row
     with DatabaseConnection() as conn, conn.cursor(row_factory=dict_row) as cursor:
         logger.info(f"Checking {len(inspections_data)} new inspections against the database...")
@@ -92,13 +96,12 @@ def update_database_batch(data):
             
             cursor.execute(
                 "SELECT grade FROM restaurants WHERE camis = %s AND inspection_date = %s",
-                (camis, str(inspection_date)) # Ensure date is a string for the query
+                (camis, str(inspection_date))
             )
             result = cursor.fetchone()
 
             if result:
-                # A record already exists. Check if the grade is being finalized.
-                previous_grade = result['grade'] # Correctly access the grade by its column name.
+                previous_grade = result['grade']
                 if previous_grade in PENDING_GRADES and new_grade in FINAL_GRADES:
                     logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {previous_grade or 'NULL'} -> {new_grade}")
                     grade_updates_to_insert.append((camis, previous_grade, new_grade, 'finalized', inspection_date))
@@ -106,8 +109,11 @@ def update_database_batch(data):
             details_item = inspection["details"]
             dba = details_item.get("dba")
             normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
-            is_critical = any(v.get("critical_flag") == CRITICAL_FLAG for v in inspection["violations"])
+            
+            # Simplified critical flag logic
+            is_critical = any(v.get("critical_flag") == CRITICAL_FLAG for v_item in data if v_item.get("camis") == camis and convert_date(v_item.get("inspection_date")) == inspection_date)
             critical_flag_for_inspection = CRITICAL_FLAG if is_critical else NOT_CRITICAL_FLAG
+
             restaurants_to_insert.append((
                 camis, dba, normalized_dba, details_item.get("boro"), details_item.get("building"),
                 details_item.get("street"), details_item.get("zipcode"), details_item.get("phone"),
@@ -116,9 +122,9 @@ def update_database_batch(data):
                 details_item.get("inspection_type"), details_item.get("cuisine_description"),
                 convert_date(details_item.get("grade_date")), details_item.get("action")
             ))
-            for v_item in inspection["violations"]:
-                if v_item.get("violation_code"):
-                    violations_to_insert.append((camis, inspection_date, v_item.get("violation_code"), v_item.get("violation_description")))
+            
+            for (v_code, v_desc) in inspection["violations"].items():
+                violations_to_insert.append((camis, inspection_date, v_code, v_desc))
 
         r_count, v_count, u_count = 0, 0, 0
         if restaurants_to_insert:
@@ -130,9 +136,9 @@ def update_database_batch(data):
             cursor.executemany(upsert_sql, restaurants_to_insert)
             r_count = cursor.rowcount
         if violations_to_insert:
-            unique_violations = list(set(violations_to_insert))
+            # Updated with the UNIQUE constraint we added to the database.
             insert_sql = "INSERT INTO violations (camis, inspection_date, violation_code, violation_description) VALUES (%s, %s, %s, %s) ON CONFLICT (camis, inspection_date, violation_code, violation_description) DO NOTHING;"
-            cursor.executemany(insert_sql, unique_violations)
+            cursor.executemany(insert_sql, violations_to_insert)
             v_count = cursor.rowcount
         
         if grade_updates_to_insert:
@@ -144,7 +150,7 @@ def update_database_batch(data):
         conn.commit()
     return r_count, v_count, u_count
 
-def run_database_update(days_back=14):
+def run_database_update(days_back=3):
     logger.info(f"Starting DB update (days_back={days_back})")
     data = fetch_data(days_back)
     if data:
@@ -153,6 +159,21 @@ def run_database_update(days_back=14):
     else:
         logger.warning("No data from API.")
     logger.info("DB update finished.")
+    
+    # --- ADDED: Automated Cache Clearing ---
+    logger.info("Attempting to clear API cache...")
+    try:
+        # Assumes the API is running on localhost from the script's container
+        api_url = f"http://localhost:{APIConfig.PORT}/clear-cache"
+        headers = {'X-Update-Secret': APIConfig.UPDATE_SECRET_KEY}
+        response = requests.post(api_url, headers=headers, timeout=30)
+        if response.status_code == 200:
+            logger.info("Successfully cleared API cache.")
+        else:
+            logger.error(f"Failed to clear API cache. Status: {response.status_code}, Response: {response.text}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Could not connect to API to clear cache: {e}")
+    # --- END ---
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Update restaurant inspection database.")
