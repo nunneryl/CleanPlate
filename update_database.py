@@ -65,6 +65,7 @@ def update_database_batch(data):
     
     logger.info("Aggregating inspection data...")
     inspections_data = {}
+    # EFFICIENT AGGREGATION: Process all violations for an inspection at once.
     for item in data:
         camis = item.get("camis")
         inspection_date = convert_date(item.get("inspection_date"))
@@ -72,10 +73,18 @@ def update_database_batch(data):
         
         inspection_key = (camis, inspection_date)
         if inspection_key not in inspections_data:
-            inspections_data[inspection_key] = {"details": item, "violations": []}
+            # Store the main details once, and prepare a set for unique violations
+            inspections_data[inspection_key] = {"details": item, "violations": set(), "critical_flags": []}
         
-        if item.get("violation_code"):
-            inspections_data[inspection_key]["violations"].append(item)
+        # Add violation if it exists
+        violation_code = item.get("violation_code")
+        if violation_code:
+            # Store as a tuple to ensure uniqueness based on code and description
+            inspections_data[inspection_key]["violations"].add(
+                (violation_code, item.get("violation_description"))
+            )
+        # Collect all critical flags for this inspection
+        inspections_data[inspection_key]["critical_flags"].append(item.get("critical_flag"))
 
     restaurants_to_insert = []
     violations_to_insert = []
@@ -86,7 +95,8 @@ def update_database_batch(data):
         logger.info(f"Checking {len(inspections_data)} new inspections against the database...")
         for key, inspection in inspections_data.items():
             camis, inspection_date = key
-            new_grade = inspection["details"].get("grade")
+            details_item = inspection["details"]
+            new_grade = details_item.get("grade")
             
             cursor.execute(
                 "SELECT grade FROM restaurants WHERE camis = %s AND inspection_date = %s",
@@ -100,12 +110,11 @@ def update_database_batch(data):
                     logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {previous_grade or 'NULL'} -> {new_grade}")
                     grade_updates_to_insert.append((camis, previous_grade, new_grade, 'finalized', inspection_date))
 
-            details_item = inspection["details"]
             dba = details_item.get("dba")
             normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
             
-            # --- CORRECTED AND EFFICIENT LOGIC ---
-            is_critical = any(v.get("critical_flag") == CRITICAL_FLAG for v in inspection["violations"])
+            # EFFICIENT CRITICAL FLAG CHECK: Check the pre-aggregated list.
+            is_critical = any(flag == CRITICAL_FLAG for flag in inspection["critical_flags"])
             critical_flag_for_inspection = CRITICAL_FLAG if is_critical else NOT_CRITICAL_FLAG
             
             restaurants_to_insert.append((
@@ -116,10 +125,11 @@ def update_database_batch(data):
                 details_item.get("inspection_type"), details_item.get("cuisine_description"),
                 convert_date(details_item.get("grade_date")), details_item.get("action")
             ))
-            for v_item in inspection["violations"]:
-                if v_item.get("violation_code"):
-                    violations_to_insert.append((camis, inspection_date, v_item.get("violation_code"), v_item.get("violation_description")))
+            
+            for v_code, v_desc in inspection["violations"]:
+                violations_to_insert.append((camis, inspection_date, v_code, v_desc))
 
+        # (The rest of the function for inserting data remains the same)
         r_count, v_count, u_count = 0, 0, 0
         if restaurants_to_insert:
             upsert_sql = """
@@ -130,10 +140,8 @@ def update_database_batch(data):
             cursor.executemany(upsert_sql, restaurants_to_insert)
             r_count = cursor.rowcount
         if violations_to_insert:
-            unique_violations = list(set(violations_to_insert))
-            # Updated with the UNIQUE constraint we added to the database.
             insert_sql = "INSERT INTO violations (camis, inspection_date, violation_code, violation_description) VALUES (%s, %s, %s, %s) ON CONFLICT (camis, inspection_date, violation_code, violation_description) DO NOTHING;"
-            cursor.executemany(insert_sql, unique_violations)
+            cursor.executemany(insert_sql, violations_to_insert)
             v_count = cursor.rowcount
         
         if grade_updates_to_insert:
