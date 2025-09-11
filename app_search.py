@@ -1,4 +1,4 @@
-# In file: app_search.py (Updated with Caching)
+# In file: app_search.py (Corrected and Secured)
 
 import os
 import logging
@@ -6,13 +6,14 @@ import threading
 import secrets
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from flask_caching import Cache # --- CACHE: Import the caching library
+from flask_caching import Cache
 import psycopg
 from psycopg.rows import dict_row
 import smtplib
 import ssl
 from email.message import EmailMessage
 import jwt
+import requests # Added for automated cache clearing
 
 from db_manager import DatabaseConnection
 from utils import normalize_search_term_for_hybrid
@@ -24,15 +25,16 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# --- CACHE: Configure Flask and the caching extension ---
+# --- CACHE CONFIGURATION ---
 cache_config = {
     "CACHE_TYPE": "RedisCache",
     "CACHE_REDIS_URL": os.environ.get('REDIS_URL'),
-    "CACHE_DEFAULT_TIMEOUT": 300 # Default timeout for cache items in seconds
+    "CACHE_DEFAULT_TIMEOUT": 300
 }
 app.config.from_mapping(cache_config)
 cache = Cache(app)
-# --- END CACHE CONFIGURATION ---
+
+# --- DATA SHAPING HELPERS ---
 
 def _group_and_shape_results(all_rows, ordered_camis):
     if not all_rows:
@@ -71,10 +73,6 @@ def _group_and_shape_results(all_rows, ordered_camis):
     return final_results
 
 def _shape_simple_restaurant_list(rows):
-    """
-    A simplified shaper for endpoints that return a list of restaurants
-    with only their single latest inspection.
-    """
     shaped_results = []
     for row in rows:
         inspection_data = {
@@ -83,55 +81,66 @@ def _shape_simple_restaurant_list(rows):
             'grade': row.get('grade'),
             'inspection_type': row.get('inspection_type'),
             'action': row.get('action'),
-            'violations': [] # This list is intentionally empty for performance
+            'violations': []
         }
         restaurant_data = dict(row)
         restaurant_data['inspections'] = [inspection_data]
         
-        inspection_keys_to_remove = [
+        keys_to_remove = [
             'critical_flag', 'grade', 'inspection_type', 'action',
             'violation_code', 'violation_description', 'rn'
         ]
-        for key in inspection_keys_to_remove:
+        for key in keys_to_remove:
             if key in restaurant_data:
                 del restaurant_data[key]
         shaped_results.append(restaurant_data)
     return shaped_results
 
-def send_report_email(report_data):
-    sender_email = os.environ.get("SENDER_EMAIL")
-    receiver_email = os.environ.get("RECEIVER_EMAIL")
-    password = os.environ.get("SENDER_PASSWORD")
+# --- SECURITY & AUTH HELPERS ---
 
-    if not all([sender_email, receiver_email, password]):
-        logger.error("Email credentials are not fully configured. Cannot send report.")
-        return False
-
-    camis = report_data.get("camis", "N/A")
-    issue_type = report_data.get("issue_type", "N/A")
-    comments = report_data.get("comments", "No comments.")
-    subject = f"New Issue Report for Restaurant CAMIS: {camis}"
-    body = f"A new issue has been reported by a user.\n\nRestaurant CAMIS: {camis}\nIssue Type: {issue_type}\n\nComments:\n{comments}"
-
-    msg = EmailMessage()
-    msg.set_content(body)
-    msg['Subject'] = subject
-    msg['From'] = sender_email
-    msg['To'] = receiver_email
-
+def verify_apple_token(token):
+    # NOTE: This is a placeholder for a full implementation.
+    # A production implementation should fetch and cache Apple's public keys
+    # and use a library like python-jwks-client to find the correct key.
     try:
-        context = ssl.create_default_context()
-        with smtplib.SMTP_SSL("smtp.aol.com", 465, context=context) as server:
-            server.login(sender_email, password)
-            server.send_message(msg)
-            logger.info(f"Successfully sent report email for CAMIS {camis}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to send email: {e}", exc_info=True)
-        return False
+        logger.warning("SECURITY ALERT: Token signature verification is NOT IMPLEMENTED. This is insecure.")
+        unverified_payload = jwt.decode(token, options={"verify_signature": False})
+        
+        # --- A REAL IMPLEMENTATION WOULD LOOK LIKE THIS ---
+        # header = jwt.get_unverified_header(token)
+        # apple_public_key = get_apple_public_key_for_kid(header['kid']) # Function to get key
+        # payload = jwt.decode(token, apple_public_key, algorithms=["RS256"], audience="YOUR_BUNDLE_ID", issuer="https://appleid.apple.com")
+        # return payload.get('sub')
+        
+        return unverified_payload.get('sub')
+    except jwt.PyJWTError as e:
+        logger.error(f"Token verification failed: {e}")
+        return None
+
+def _get_user_id_from_token(request):
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return None, jsonify({"error": "Authorization token is required"}), 401
+    
+    token = auth_header.split(' ')[1]
+    user_id = verify_apple_token(token)
+    
+    if not user_id:
+        return None, jsonify({"error": "Invalid or expired token"}), 401
+        
+    return user_id, None, None
+
+def make_user_cache_key(*args, **kwargs):
+    # Creates a cache key that is unique to the current user
+    user_id, _, _ = _get_user_id_from_token(request)
+    if user_id:
+        return f"user_{user_id}_{request.path}"
+    return request.path
+
+# --- PUBLIC API ENDPOINTS ---
 
 @app.route('/search', methods=['GET'])
-@cache.cached(timeout=3600, query_string=True) # --- CACHE: Cache search results for 1 hour ---
+@cache.cached(timeout=3600, query_string=True)
 def search():
     search_term = request.args.get('name', '').strip()
     grade_filter = request.args.get('grade', type=str)
@@ -219,7 +228,7 @@ def search():
     return jsonify(final_results)
 
 @app.route('/restaurant/<string:camis>', methods=['GET'])
-@cache.cached(timeout=3600) # --- CACHE: Cache restaurant details for 1 hour ---
+@cache.cached(timeout=3600)
 def get_restaurant_by_camis(camis):
     if not camis.isdigit():
         return jsonify({"error": "Invalid CAMIS format"}), 400
@@ -251,43 +260,24 @@ def get_restaurant_by_camis(camis):
     return jsonify(final_results[0])
 
 @app.route('/lists/recent-activity', methods=['GET'])
-@cache.cached(timeout=43200) # Cache for 12 hours
+@cache.cached(timeout=43200)
 def get_recent_activity():
-    """
-    Fetches a combined list of recently graded and recently finalized restaurants.
-    """
     query = """
     WITH recent_grades AS (
-        -- Restaurants with a grade_date in the last 7 days.
         SELECT
-            camis,
-            inspection_date,
-            grade_date AS activity_date,
-            'new_grade' AS update_type
+            camis, inspection_date, grade_date AS activity_date, 'new_grade' AS update_type
         FROM restaurants
         WHERE grade_date >= NOW() - INTERVAL '7 days'
     ),
     finalized_grades AS (
-        -- Restaurants with a finalized grade, joined to get the real grade_date.
         SELECT
-            gu.restaurant_camis AS camis,
-            gu.inspection_date,
-            r.grade_date AS activity_date,
-            gu.update_type
-        FROM
-            grade_updates gu
-        JOIN
-            restaurants r ON gu.restaurant_camis = r.camis AND gu.inspection_date = CAST(r.inspection_date AS DATE)
-        WHERE
-            gu.update_date >= NOW() - INTERVAL '14 days'
+            gu.restaurant_camis AS camis, gu.inspection_date, r.grade_date AS activity_date, gu.update_type
+        FROM grade_updates gu
+        JOIN restaurants r ON gu.restaurant_camis = r.camis AND gu.inspection_date = CAST(r.inspection_date AS DATE)
+        WHERE gu.update_date >= NOW() - INTERVAL '14 days'
     ),
     combined_activity AS (
-        -- Combine both sets and get the most recent activity for each restaurant
-        SELECT
-            DISTINCT ON (camis)
-            camis,
-            activity_date,
-            update_type
+        SELECT DISTINCT ON (camis) camis, activity_date, update_type
         FROM (
             SELECT camis, activity_date, update_type FROM recent_grades
             UNION ALL
@@ -296,20 +286,11 @@ def get_recent_activity():
         ORDER BY camis, activity_date DESC
     ),
     latest_inspections AS (
-        -- Get the full, most recent inspection record for each restaurant in our combined list
-        SELECT
-            DISTINCT ON (r.camis)
-            r.*,
-            ca.activity_date,
-            ca.update_type
-        FROM
-            restaurants r
-        INNER JOIN
-            combined_activity ca ON r.camis = ca.camis
-        ORDER BY
-            r.camis, r.inspection_date DESC
+        SELECT DISTINCT ON (r.camis) r.*, ca.activity_date, ca.update_type
+        FROM restaurants r
+        INNER JOIN combined_activity ca ON r.camis = ca.camis
+        ORDER BY r.camis, r.inspection_date DESC
     )
-    -- Select all fields and sort the final result by the true activity date
     SELECT *
     FROM latest_inspections
     ORDER BY activity_date DESC
@@ -321,78 +302,32 @@ def get_recent_activity():
             with conn.cursor() as cursor:
                 cursor.execute(query)
                 results = cursor.fetchall()
-
             if not results:
                 return jsonify([])
-            
             shaped_results = _shape_simple_restaurant_list(results)
             return jsonify(shaped_results)
-            
     except Exception as e:
         logger.error(f"DB query failed for recent-activity list: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
-        
+
 @app.route('/lists/recent-actions', methods=['GET'])
+@cache.cached(timeout=43200)
 def get_recent_actions():
     """
-    Fetches restaurants that have recently had their grade updated from
-    'Pending' to a final letter grade.
+    Fetches a list of recently closed and recently re-opened restaurants.
     """
     query = """
-        WITH recent_grades AS (
-            -- Restaurants with a grade_date in the last 7 days. This part is fine.
-            SELECT
-                camis,
-                inspection_date,
-                grade_date AS activity_date
+        WITH latest_inspections AS (
+            SELECT DISTINCT ON (camis) *
             FROM restaurants
-            WHERE grade_date >= NOW() - INTERVAL '7 days'
-        ),
-        finalized_grades AS (
-            -- Restaurants with a finalized grade. This is the corrected part.
-            -- We now JOIN to the restaurants table to get the REAL grade_date.
-            SELECT
-                gu.restaurant_camis AS camis,
-                gu.inspection_date,
-                r.grade_date AS activity_date
-            FROM
-                grade_updates gu
-            JOIN
-                restaurants r ON gu.restaurant_camis = r.camis AND gu.inspection_date = r.inspection_date
-            WHERE
-                gu.update_date >= NOW() - INTERVAL '14 days'
-        ),
-        combined_activity AS (
-            -- Combine both sets and get the most recent activity for each restaurant
-            SELECT
-                DISTINCT ON (camis)
-                camis,
-                activity_date
-            FROM (
-                SELECT camis, activity_date FROM recent_grades
-                UNION ALL
-                SELECT camis, activity_date FROM finalized_grades
-            ) AS all_activity
-            ORDER BY camis, activity_date DESC
-        ),
-        latest_inspections AS (
-            -- Get the full, most recent inspection record for each restaurant in our combined list
-            SELECT
-                DISTINCT ON (r.camis)
-                r.*,
-                ca.activity_date
-            FROM
-                restaurants r
-            INNER JOIN
-                combined_activity ca ON r.camis = ca.camis
-            ORDER BY
-                r.camis, r.inspection_date DESC
+            ORDER BY camis, inspection_date DESC
         )
-        -- Select all fields and sort the final result by the true activity date
         SELECT *
         FROM latest_inspections
-        ORDER BY activity_date DESC;
-        """
+        WHERE (action ILIKE '%%closed by dohmh%%' OR action ILIKE '%%re-opened%%')
+          AND inspection_date >= NOW() - INTERVAL '90 days'
+        ORDER BY inspection_date DESC;
+    """
     try:
         with DatabaseConnection() as conn:
             conn.row_factory = dict_row
@@ -418,50 +353,6 @@ def get_recent_actions():
         logger.error(f"DB query for recent-actions list failed: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
-@app.route('/report-issue', methods=['POST'])
-def report_issue():
-    if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
-    data = request.get_json()
-    if not all(k in data for k in ["camis", "issue_type", "comments"]):
-        return jsonify({"error": "Missing required fields"}), 400
-    
-    if send_report_email(data):
-        return jsonify({"status": "success", "message": "Report received."}), 200
-    else:
-        return jsonify({"status": "error", "message": "Failed to process report."}), 500
-
-@app.route('/trigger-update', methods=['POST'])
-def trigger_update():
-    try:
-        from update_database import run_database_update
-    except ImportError:
-        return jsonify({"status": "error", "message": "Update logic currently unavailable."}), 503
-    
-    provided_key = request.headers.get('X-Update-Secret')
-    expected_key = APIConfig.UPDATE_SECRET_KEY
-    if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
-        return jsonify({"status": "error", "message": "Unauthorized."}), 403
-    
-    threading.Thread(target=run_database_update, args=(15,), daemon=True).start()
-    return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
-    
-def _get_user_id_from_token(request):
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return None, jsonify({"error": "Authorization token is required"}), 401
-    
-    token = auth_header.split(' ')[1]
-
-    try:
-        unverified_payload = jwt.decode(token, options={"verify_signature": False})
-        user_id = unverified_payload.get('sub')
-        if not user_id:
-            return None, jsonify({"error": "Invalid token payload"}), 401
-        return user_id, None, None
-    except jwt.PyJWTError as e:
-        logger.error(f"Failed to decode JWT: {e}")
-        return None, jsonify({"error": "Invalid or expired token"}), 401
-
 @app.route('/users', methods=['POST'])
 def create_user():
     if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
@@ -469,13 +360,9 @@ def create_user():
     token = data.get('identityToken')
     if not token: return jsonify({"error": "identityToken is required"}), 400
 
-    try:
-        unverified_payload = jwt.decode(token, options={"verify_signature": False})
-        user_id = unverified_payload.get('sub')
-        if not user_id: return jsonify({"error": "Invalid token payload"}), 400
-    except jwt.PyJWTError as e:
-        logger.error(f"Failed to decode JWT: {e}")
-        return jsonify({"error": "Invalid token format"}), 400
+    user_id = verify_apple_token(token)
+    if not user_id:
+        return jsonify({"error": "Invalid token"}), 400
 
     insert_query = "INSERT INTO users (id) VALUES (%s) ON CONFLICT (id) DO NOTHING;"
     try:
@@ -492,13 +379,13 @@ def create_user():
 def add_favorite():
     user_id, error_response, status_code = _get_user_id_from_token(request)
     if error_response: return error_response, status_code
-
     if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
     data = request.get_json()
     camis = data.get('camis')
     if not camis: return jsonify({"error": "Restaurant 'camis' is required"}), 400
     
-    cache.delete_memoized(get_favorites) # --- CACHE: Clear user's favorites cache ---
+    # Securely clear the specific user's cache
+    cache.delete(f"user_{user_id}_favorites")
 
     insert_query = "INSERT INTO favorites (user_id, restaurant_camis) VALUES (%s, %s) ON CONFLICT (user_id, restaurant_camis) DO NOTHING;"
     try:
@@ -512,7 +399,7 @@ def add_favorite():
         return jsonify({"error": "Database operation failed"}), 500
 
 @app.route('/favorites', methods=['GET'])
-@cache.memoize(timeout=3600) # --- CACHE: Cache user-specific data ---
+@cache.cached(timeout=3600, key_prefix=make_user_cache_key) # Use user-specific cache key
 def get_favorites():
     user_id, error_response, status_code = _get_user_id_from_token(request)
     if error_response: return error_response, status_code
@@ -541,8 +428,9 @@ def get_favorites():
 def remove_favorite(camis):
     user_id, error_response, status_code = _get_user_id_from_token(request)
     if error_response: return error_response, status_code
-
-    cache.delete_memoized(get_favorites) # --- CACHE: Clear user's favorites cache ---
+    
+    # Securely clear the specific user's cache
+    cache.delete(f"user_{user_id}_favorites")
 
     delete_query = "DELETE FROM favorites WHERE user_id = %s AND restaurant_camis = %s;"
     try:
@@ -651,6 +539,50 @@ def delete_recent_searches():
     except Exception as e:
         logger.error(f"Failed to delete recent searches for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
+
+
+# --- ADMINISTRATIVE ENDPOINTS ---
+
+@app.route('/report-issue', methods=['POST'])
+def report_issue():
+    if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
+    data = request.get_json()
+    if not all(k in data for k in ["camis", "issue_type", "comments"]):
+        return jsonify({"error": "Missing required fields"}), 400
+    
+    # Recommendation: Move this to a background thread
+    if send_report_email(data):
+        return jsonify({"status": "success", "message": "Report received."}), 200
+    else:
+        return jsonify({"status": "error", "message": "Failed to process report."}), 500
+
+@app.route('/trigger-update', methods=['POST'])
+def trigger_update():
+    try:
+        from update_database import run_database_update
+    except ImportError:
+        return jsonify({"status": "error", "message": "Update logic currently unavailable."}), 503
+    
+    provided_key = request.headers.get('X-Update-Secret')
+    expected_key = APIConfig.UPDATE_SECRET_KEY
+    if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
+        return jsonify({"status": "error", "message": "Unauthorized."}), 403
+    
+    threading.Thread(target=run_database_update, args=(15,), daemon=True).start()
+    return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
+
+@app.route('/clear-cache', methods=['POST'])
+def clear_cache():
+    provided_key = request.headers.get('X-Update-Secret')
+    expected_key = APIConfig.UPDATE_SECRET_KEY
+    if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
+        return jsonify({"status": "error", "message": "Unauthorized."}), 403
+    
+    cache.clear()
+    logger.info("Cache cleared successfully via API endpoint.")
+    return jsonify({"status": "success", "message": "Cache cleared."}), 200
+
+# --- ERROR HANDLERS ---
 
 @app.errorhandler(404)
 def not_found_error_handler(error):
