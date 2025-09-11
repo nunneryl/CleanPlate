@@ -330,10 +330,6 @@ def get_recent_activity():
     except Exception as e:
         logger.error(f"DB query failed for recent-activity list: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
-            
-    except Exception as e:
-        logger.error(f"DB query failed for recent-activity list: {e}", exc_info=True)
-        return jsonify({"error": "Database query failed"}), 500
         
 @app.route('/lists/grade-updates', methods=['GET'])
 def get_grade_updates():
