@@ -331,8 +331,8 @@ def get_recent_activity():
         logger.error(f"DB query failed for recent-activity list: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
         
-@app.route('/lists/grade-updates', methods=['GET'])
-def get_grade_updates():
+@app.route('/lists/recent-actions', methods=['GET'])
+def get_recent_actions():
     """
     Fetches restaurants that have recently had their grade updated from
     'Pending' to a final letter grade.
