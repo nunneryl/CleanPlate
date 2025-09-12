@@ -1,4 +1,4 @@
-# In file: update_database.py (Fully Optimized and Automated)
+# In file: update_database.py (Final Optimized Version)
 
 import logging
 import argparse
@@ -88,20 +88,29 @@ def update_database_batch(data):
 
     with DatabaseConnection() as conn, conn.cursor(row_factory=dict_row) as cursor:
         
-        logger.info(f"Fetching {len(inspections_data)} corresponding records from local database for comparison...")
+        logger.info(f"Fetching corresponding records from local database for comparison...")
         inspection_keys_to_check = list(inspections_data.keys())
         existing_records = {}
 
         if inspection_keys_to_check:
-            key_tuples = [(key[0], str(key[1])) for key in inspection_keys_to_check]
-            query = "SELECT camis, inspection_date, grade, action, critical_flag FROM restaurants WHERE (camis, inspection_date) = ANY(%s)"
-            cursor.execute(query, (key_tuples,))
-            existing_records_raw = cursor.fetchall()
+            # 1. Prepare separate lists for camis and inspection_dates
+            camis_list = [key[0] for key in inspection_keys_to_check]
+            dates_list = [key[1] for key in inspection_keys_to_check]
 
+            # 2. Use the UNNEST method for an efficient bulk SELECT
+            query = """
+                SELECT r.camis, r.inspection_date, r.grade, r.action, r.critical_flag
+                FROM unnest(%s::varchar[], %s::date[]) AS t(camis, inspection_date)
+                JOIN restaurants r ON r.camis = t.camis AND CAST(r.inspection_date AS DATE) = t.inspection_date;
+            """
+            cursor.execute(query, (camis_list, dates_list))
+            existing_records_raw = cursor.fetchall()
+            
             for rec in existing_records_raw:
                 existing_records[(rec['camis'], rec['inspection_date'].date())] = rec
+            
             logger.info(f"Found {len(existing_records)} existing records to compare against.")
-
+        
         logger.info("Comparing API data with local data to find what's new or changed...")
         for key, inspection in inspections_data.items():
             camis, inspection_date = key
@@ -114,9 +123,8 @@ def update_database_batch(data):
             
             needs_db_update = False
             if not existing_record:
-                needs_db_update = True # It's a brand new inspection
+                needs_db_update = True
             else:
-                # Compare fields to see if an update is needed
                 if (details_item.get("grade") != existing_record.get("grade") or
                     details_item.get("action") != existing_record.get("action") or
                     critical_flag_for_inspection != existing_record.get("critical_flag")):
@@ -124,7 +132,6 @@ def update_database_batch(data):
 
             if needs_db_update:
                 new_grade = details_item.get("grade")
-                # Check for finalized grades only on records that need an update
                 if existing_record and existing_record['grade'] in PENDING_GRADES and new_grade in FINAL_GRADES:
                     logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {existing_record['grade'] or 'NULL'} -> {new_grade}")
                     grade_updates_to_insert.append((camis, existing_record['grade'], new_grade, 'finalized', inspection_date))
@@ -141,7 +148,6 @@ def update_database_batch(data):
                     convert_date(details_item.get("grade_date")), details_item.get("action")
                 ))
 
-            # Violations are added regardless, ON CONFLICT will handle duplicates
             for v_code, v_desc in inspection["violations"]:
                 violations_to_insert.append((camis, inspection_date, v_code, v_desc))
 
