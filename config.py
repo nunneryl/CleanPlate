@@ -45,6 +45,7 @@ class APIConfig:
     NYC_API_APP_TOKEN = os.environ.get("NYC_API_APP_TOKEN", None)
     API_REQUEST_LIMIT = int(os.environ.get("API_REQUEST_LIMIT", "50000"))
     UPDATE_SECRET_KEY = os.environ.get("UPDATE_SECRET_KEY", None)
+    API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:5000")
 
 # Redis configuration
 class RedisConfig:
