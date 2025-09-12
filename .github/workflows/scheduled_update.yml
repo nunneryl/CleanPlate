@@ -19,6 +19,7 @@ jobs:
           # These values are read from GitHub Repository Secrets (see below)
           APP_URL: ${{ secrets.RAILWAY_APP_URL }}
           UPDATE_SECRET: ${{ secrets.UPDATE_SECRET_KEY }}
+          API_BASE_URL: ${{ secrets.RAILWAY_APP_URL }}
         run: |
           echo "Triggering update for $APP_URL"
           # Send POST request with the secret header
