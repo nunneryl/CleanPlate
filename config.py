@@ -39,7 +39,7 @@ class DatabaseConfig:
 class APIConfig:
     DEBUG = os.environ.get("DEBUG", "False").lower() == "true"
     HOST = os.environ.get("HOST", "0.0.0.0")
-    PORT = int(os.environ.get("PORT", "5000"))
+    PORT = int(os.environ.get("PORT", "8080"))
 
     NYC_API_URL = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
     NYC_API_APP_TOKEN = os.environ.get("NYC_API_APP_TOKEN", None)
