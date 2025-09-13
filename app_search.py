@@ -256,35 +256,35 @@ def get_recent_actions():
     graded_query = """
         WITH recent_grades AS (
             SELECT
-                camis, inspection_date, grade_date AS activity_date, 'new_grade' AS update_type
+                camis, inspection_date, grade_date AS activity_date, NULL::timestamptz AS finalized_date, 'new_grade' AS update_type
             FROM restaurants
             WHERE grade_date >= NOW() - INTERVAL '7 days'
         ),
         finalized_grades AS (
             SELECT
-                gu.restaurant_camis AS camis, gu.inspection_date, r.grade_date AS activity_date, gu.update_type
+                gu.restaurant_camis AS camis, gu.inspection_date, r.grade_date AS activity_date, gu.update_date AS finalized_date, gu.update_type
             FROM grade_updates gu
             JOIN restaurants r ON gu.restaurant_camis = r.camis AND gu.inspection_date = CAST(r.inspection_date AS DATE)
             WHERE gu.update_date >= NOW() - INTERVAL '14 days'
         ),
         combined_activity AS (
-            SELECT DISTINCT ON (camis) camis, activity_date, update_type
+            SELECT DISTINCT ON (camis) camis, activity_date, finalized_date, update_type
             FROM (
-                SELECT camis, activity_date, update_type FROM recent_grades
+                SELECT camis, activity_date, finalized_date, update_type FROM recent_grades
                 UNION ALL
-                SELECT camis, activity_date, update_type FROM finalized_grades
+                SELECT camis, activity_date, finalized_date, update_type FROM finalized_grades
             ) AS all_activity
-            ORDER BY camis, activity_date DESC
+            ORDER BY camis, COALESCE(finalized_date, activity_date) DESC
         ),
         latest_inspections AS (
-            SELECT DISTINCT ON (r.camis) r.*, ca.activity_date, ca.update_type
+            SELECT DISTINCT ON (r.camis) r.*, ca.activity_date, ca.finalized_date, ca.update_type
             FROM restaurants r
             INNER JOIN combined_activity ca ON r.camis = ca.camis
             ORDER BY r.camis, r.inspection_date DESC
         )
         SELECT *
         FROM latest_inspections
-        ORDER BY activity_date DESC
+        ORDER BY COALESCE(finalized_date, activity_date) DESC
         LIMIT 200;
     """
 
