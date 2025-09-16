@@ -276,12 +276,13 @@ def get_recent_actions():
             )
         ),
         most_recent_per_restaurant AS (
-            -- From all events, pick only the single most recent one for each restaurant
+            -- From all events, pick only the single most recent one for each restaurant,
+            -- PRIORITIZING the newest inspection date above all else.
             SELECT DISTINCT ON (camis) *
             FROM all_recent_events
-            ORDER BY camis, sort_date DESC
+            ORDER BY camis, inspection_date DESC, sort_date DESC
         )
-        -- Finally, sort the result list for display
+        -- Finally, sort the result list for display by its relevant date
         SELECT *
         FROM most_recent_per_restaurant
         ORDER BY sort_date DESC
@@ -297,7 +298,7 @@ def get_recent_actions():
         SELECT *
         FROM latest_inspections
         WHERE (action ILIKE '%%closed by dohmh%%' OR action ILIKE '%%re-opened%%')
-          AND inspection_date >= '2022-01-01'
+          AND inspection_date >= '2022-01-01' -- Increased range to ensure visibility
         ORDER BY inspection_date DESC;
     """
 
