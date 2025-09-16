@@ -250,29 +250,40 @@ def get_restaurant_by_camis(camis):
     return jsonify(final_results[0])
 
 @app.route('/lists/recent-actions', methods=['GET'])
-@cache.cached(timeout=3600) # Reduced cache time for more frequent updates
+@cache.cached(timeout=3600)
 def get_recent_actions():
     graded_query = """
-        (
-            -- Part 1: Select newly graded restaurants from the last 7 days
-            SELECT *,
-                   grade_date as sort_date, -- Use the grade_date for sorting this group
-                   'new_grade' as update_type,
-                   NULL::timestamptz as finalized_date
-            FROM restaurants
-            WHERE grade_date >= (CURRENT_DATE - INTERVAL '7 days')
+        WITH all_recent_events AS (
+            (
+                -- Part 1: Select newly graded restaurants
+                SELECT *,
+                       grade_date as sort_date,
+                       'new_grade' as update_type,
+                       NULL::timestamptz as finalized_date
+                FROM restaurants
+                WHERE grade_date >= (CURRENT_DATE - INTERVAL '7 days')
+            )
+            UNION ALL
+            (
+                -- Part 2: Select restaurants whose pending grade was recently finalized
+                SELECT r.*,
+                       gu.update_date as sort_date,
+                       gu.update_type,
+                       gu.update_date as finalized_date
+                FROM grade_updates gu
+                JOIN restaurants r ON gu.restaurant_camis = r.camis AND gu.inspection_date = r.inspection_date::date
+                WHERE gu.update_date >= (NOW() - INTERVAL '14 days')
+            )
+        ),
+        most_recent_per_restaurant AS (
+            -- From all events, pick only the single most recent one for each restaurant
+            SELECT DISTINCT ON (camis) *
+            FROM all_recent_events
+            ORDER BY camis, sort_date DESC
         )
-        UNION
-        (
-            -- Part 2: Select restaurants whose pending grade was recently finalized
-            SELECT r.*,
-                   gu.update_date as sort_date, -- Use the update_date for sorting this group
-                   gu.update_type,
-                   gu.update_date as finalized_date
-            FROM grade_updates gu
-            JOIN restaurants r ON gu.restaurant_camis = r.camis AND gu.inspection_date = r.inspection_date::date
-            WHERE gu.update_date >= (NOW() - INTERVAL '14 days')
-        )
+        -- Finally, sort the result list for display
+        SELECT *
+        FROM most_recent_per_restaurant
         ORDER BY sort_date DESC
         LIMIT 200;
     """
@@ -286,7 +297,7 @@ def get_recent_actions():
         SELECT *
         FROM latest_inspections
         WHERE (action ILIKE '%%closed by dohmh%%' OR action ILIKE '%%re-opened%%')
-          AND inspection_date >= NOW() - INTERVAL '90 days'
+          AND inspection_date >= '2022-01-01'
         ORDER BY inspection_date DESC;
     """
 
