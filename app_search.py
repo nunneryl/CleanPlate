@@ -253,45 +253,27 @@ def get_restaurant_by_camis(camis):
 @cache.cached(timeout=3600) # Reduced cache time for more frequent updates
 def get_recent_actions():
     graded_query = """
-        WITH recent_events AS (
-            -- 1. Get newly graded restaurants from the last 7 days
-            SELECT
-                camis,
-                inspection_date,
-                grade_date AS activity_date,
-                NULL::timestamptz AS finalized_date,
-                'new_grade' AS update_type
+        (
+            -- Part 1: Select newly graded restaurants from the last 7 days
+            SELECT *,
+                   grade_date as sort_date, -- Use the grade_date for sorting this group
+                   'new_grade' as update_type,
+                   NULL::timestamptz as finalized_date
             FROM restaurants
-            WHERE grade_date >= NOW() - INTERVAL '7 days'
-
-            UNION
-
-            -- 2. Get grades finalized from Pending in the last 14 days
-            SELECT
-                gu.restaurant_camis AS camis,
-                CAST(gu.inspection_date AS timestamp) AS inspection_date,
-                r.grade_date AS activity_date,
-                gu.update_date AS finalized_date,
-                gu.update_type
-            FROM grade_updates gu
-            JOIN restaurants r ON gu.restaurant_camis = r.camis AND gu.inspection_date = CAST(r.inspection_date AS DATE)
-            WHERE gu.update_date >= NOW() - INTERVAL '14 days'
-        ),
-        -- 3. Get the full details for each unique event
-        latest_details AS (
-            SELECT DISTINCT ON (re.camis, re.inspection_date)
-                r.*,
-                re.activity_date,
-                re.finalized_date,
-                re.update_type
-            FROM recent_events re
-            JOIN restaurants r ON re.camis = r.camis AND re.inspection_date = r.inspection_date
-            ORDER BY re.camis, re.inspection_date, r.record_date DESC
+            WHERE grade_date >= (CURRENT_DATE - INTERVAL '7 days')
         )
-        -- 4. Final sort and limit
-        SELECT *
-        FROM latest_details
-        ORDER BY COALESCE(finalized_date, activity_date) DESC
+        UNION
+        (
+            -- Part 2: Select restaurants whose pending grade was recently finalized
+            SELECT r.*,
+                   gu.update_date as sort_date, -- Use the update_date for sorting this group
+                   gu.update_type,
+                   gu.update_date as finalized_date
+            FROM grade_updates gu
+            JOIN restaurants r ON gu.restaurant_camis = r.camis AND gu.inspection_date = r.inspection_date::date
+            WHERE gu.update_date >= (NOW() - INTERVAL '14 days')
+        )
+        ORDER BY sort_date DESC
         LIMIT 200;
     """
 
