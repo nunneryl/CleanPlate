@@ -87,7 +87,8 @@ def _shape_simple_restaurant_list(rows):
         restaurant_data['inspections'] = [inspection_data]
         keys_to_remove = [
             'critical_flag', 'grade', 'inspection_type', 'action',
-            'violation_code', 'violation_description', 'rn'
+            'violation_code', 'violation_description', 'rn',
+            'sort_date'
         ]
         for key in keys_to_remove:
             if key in restaurant_data:
