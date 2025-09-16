@@ -250,45 +250,51 @@ def get_restaurant_by_camis(camis):
     return jsonify(final_results[0])
 
 @app.route('/lists/recent-actions', methods=['GET'])
-@cache.cached(timeout=43200)
+@cache.cached(timeout=3600) # Reduced cache time for more frequent updates
 def get_recent_actions():
-    # Query for recently graded restaurants (logic from the old endpoint)
     graded_query = """
-        WITH recent_grades AS (
+        WITH recent_events AS (
+            -- 1. Get newly graded restaurants from the last 7 days
             SELECT
-                camis, inspection_date, grade_date AS activity_date, NULL::timestamptz AS finalized_date, 'new_grade' AS update_type
+                camis,
+                inspection_date,
+                grade_date AS activity_date,
+                NULL::timestamptz AS finalized_date,
+                'new_grade' AS update_type
             FROM restaurants
             WHERE grade_date >= NOW() - INTERVAL '7 days'
-        ),
-        finalized_grades AS (
+
+            UNION
+
+            -- 2. Get grades finalized from Pending in the last 14 days
             SELECT
-                gu.restaurant_camis AS camis, gu.inspection_date, r.grade_date AS activity_date, gu.update_date AS finalized_date, gu.update_type
+                gu.restaurant_camis AS camis,
+                CAST(gu.inspection_date AS timestamp) AS inspection_date,
+                r.grade_date AS activity_date,
+                gu.update_date AS finalized_date,
+                gu.update_type
             FROM grade_updates gu
             JOIN restaurants r ON gu.restaurant_camis = r.camis AND gu.inspection_date = CAST(r.inspection_date AS DATE)
             WHERE gu.update_date >= NOW() - INTERVAL '14 days'
         ),
-        combined_activity AS (
-            SELECT DISTINCT ON (camis) camis, activity_date, finalized_date, update_type
-            FROM (
-                SELECT camis, activity_date, finalized_date, update_type FROM recent_grades
-                UNION ALL
-                SELECT camis, activity_date, finalized_date, update_type FROM finalized_grades
-            ) AS all_activity
-            ORDER BY camis, COALESCE(finalized_date, activity_date) DESC
-        ),
-        latest_inspections AS (
-            SELECT DISTINCT ON (r.camis) r.*, ca.activity_date, ca.finalized_date, ca.update_type
-            FROM restaurants r
-            INNER JOIN combined_activity ca ON r.camis = ca.camis
-            ORDER BY r.camis, r.inspection_date DESC
+        -- 3. Get the full details for each unique event
+        latest_details AS (
+            SELECT DISTINCT ON (re.camis, re.inspection_date)
+                r.*,
+                re.activity_date,
+                re.finalized_date,
+                re.update_type
+            FROM recent_events re
+            JOIN restaurants r ON re.camis = r.camis AND re.inspection_date = r.inspection_date
+            ORDER BY re.camis, re.inspection_date, r.record_date DESC
         )
+        -- 4. Final sort and limit
         SELECT *
-        FROM latest_inspections
+        FROM latest_details
         ORDER BY COALESCE(finalized_date, activity_date) DESC
         LIMIT 200;
     """
 
-    # Query for recently closed or reopened restaurants
     actions_query = """
         WITH latest_inspections AS (
             SELECT DISTINCT ON (camis) *
@@ -306,23 +312,19 @@ def get_recent_actions():
         with DatabaseConnection() as conn:
             conn.row_factory = dict_row
             with conn.cursor() as cursor:
-                # Execute all queries
                 cursor.execute(graded_query)
                 graded_results = cursor.fetchall()
 
                 cursor.execute(actions_query)
                 action_results = cursor.fetchall()
 
-            # Process the results
             closed_rows = [row for row in action_results if 'closed' in row.get('action', '').lower()]
             reopened_rows = [row for row in action_results if 're-opened' in row.get('action', '').lower()]
 
-            # Shape the data for the API response
             shaped_graded = _shape_simple_restaurant_list(graded_results)
             shaped_closed = _shape_simple_restaurant_list(closed_rows)
             shaped_reopened = _shape_simple_restaurant_list(reopened_rows)
 
-            # Return all three lists in the JSON response
             return jsonify({
                 "recently_graded": shaped_graded,
                 "recently_closed": shaped_closed,
