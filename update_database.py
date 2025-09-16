@@ -108,6 +108,15 @@ def update_database_batch(data):
             
             for rec in existing_records_raw:
                 existing_records[(rec['camis'], rec['inspection_date'].date())] = rec
+                
+            # --- NEW: Fetch all recently logged updates to prevent duplicates ---
+            cursor.execute("""
+                SELECT restaurant_camis, inspection_date FROM grade_updates
+                WHERE update_date >= NOW() - INTERVAL '30 days'
+        """)
+        logged_updates = {(row['restaurant_camis'], row['inspection_date']) for row in cursor.fetchall()}
+        logger.info(f"Found {len(logged_updates)} recently logged grade updates to cross-reference.")
+        # --- END NEW ---
             
             logger.info(f"Found {len(existing_records)} existing records to compare against.")
         
@@ -132,9 +141,14 @@ def update_database_batch(data):
 
             if needs_db_update:
                 new_grade = details_item.get("grade")
-                if existing_record and existing_record['grade'] in PENDING_GRADES and new_grade in FINAL_GRADES:
-                    logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {existing_record['grade'] or 'NULL'} -> {new_grade}")
-                    grade_updates_to_insert.append((camis, existing_record['grade'], new_grade, 'finalized', inspection_date))
+              # --- NEW: Check if the event was already logged ---
+              already_logged = key in logged_updates
+              # --- END NEW ---
+              
+              # --- UPDATED CONDITION: Now checks if it was already logged ---
+              if existing_record and existing_record['grade'] in PENDING_GRADES and new_grade in FINAL_GRADES and not already_logged:
+                  logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {existing_record['grade'] or 'NULL'} -> {new_grade}")
+                  grade_updates_to_insert.append((camis, existing_record['grade'], new_grade, 'finalized', inspection_date))
 
                 dba = details_item.get("dba")
                 normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
