@@ -256,13 +256,14 @@ def get_recent_actions():
     graded_query = """
         WITH all_recent_events AS (
             (
-                -- Part 1: Select newly graded restaurants
+                -- Part 1: Select newly graded restaurants from the last 7 days
                 SELECT *,
                        grade_date as sort_date,
                        'new_grade' as update_type,
                        NULL::timestamptz as finalized_date
                 FROM restaurants
-                WHERE grade_date >= (CURRENT_DATE - INTERVAL '7 days')
+                -- Using NOW() for a consistent timestamp comparison
+                WHERE grade_date >= (NOW() - INTERVAL '7 days')
             )
             UNION ALL
             (
@@ -299,7 +300,7 @@ def get_recent_actions():
         SELECT *
         FROM latest_inspections
         WHERE (action ILIKE '%%closed by dohmh%%' OR action ILIKE '%%re-opened%%')
-          AND inspection_date >= '2022-01-01' -- Increased range to ensure visibility
+          AND inspection_date >= '2022-01-01'
         ORDER BY inspection_date DESC;
     """
 
