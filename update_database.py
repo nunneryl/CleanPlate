@@ -91,9 +91,10 @@ def update_database_batch(data):
         logger.info(f"Fetching corresponding records from local database for comparison...")
         inspection_keys_to_check = list(inspections_data.keys())
         existing_records = {}
-
+        camis_list = []
+        
         if inspection_keys_to_check:
-            camis_list = [key[0] for key in inspection_keys_to_check]
+            camis_list = list(set([key[0] for key in inspection_keys_to_check]))
             dates_list = [key[1] for key in inspection_keys_to_check]
 
             query = """
@@ -109,19 +110,38 @@ def update_database_batch(data):
             
             logger.info(f"Found {len(existing_records)} existing records to compare against.")
 
-        # --- NEW: Fetch recently logged updates to prevent duplicates ---
+        # --- Fetch recently logged updates to prevent duplicates ---
         cursor.execute("""
             SELECT restaurant_camis, inspection_date FROM grade_updates
             WHERE update_date >= NOW() - INTERVAL '30 days'
         """)
         logged_updates = {(row['restaurant_camis'], row['inspection_date']) for row in cursor.fetchall()}
         logger.info(f"Found {len(logged_updates)} recently logged grade updates to cross-reference.")
-        # --- END NEW ---
+        
+        # --- Fetch the LATEST known inspection date for each relevant restaurant ---
+        if camis_list:
+            cursor.execute("""
+                SELECT camis, MAX(inspection_date) as max_date
+                FROM restaurants
+                WHERE camis = ANY(%s)
+                GROUP BY camis
+            """, (camis_list,))
+            latest_inspection_dates = {row['camis']: row['max_date'].date() for row in cursor.fetchall()}
+            logger.info(f"Fetched latest known inspection dates for {len(latest_inspection_dates)} restaurants.")
+        else:
+            latest_inspection_dates = {}
         
         logger.info("Comparing API data with local data to find what's new or changed...")
         for key, inspection in inspections_data.items():
             camis, inspection_date = key
             details_item = inspection["details"]
+            
+            # --- FIX #2 in action: Check if the incoming inspection is outdated ---
+            latest_known_date = latest_inspection_dates.get(camis)
+            if latest_known_date and inspection_date < latest_known_date:
+                # We already have a newer inspection on file for this restaurant.
+                # This update is for an older, irrelevant inspection. Skip it entirely.
+                continue
             
             existing_record = existing_records.get(key)
             
@@ -139,9 +159,10 @@ def update_database_batch(data):
 
             if needs_db_update:
                 new_grade = details_item.get("grade")
+                # ---  in action: Check if the event was already logged ---
                 already_logged = key in logged_updates
               
-                # --- UPDATED CONDITION: Now checks if it was already logged ---
+                # --- Now includes the check for duplicates ---
                 if existing_record and existing_record['grade'] in PENDING_GRADES and new_grade in FINAL_GRADES and not already_logged:
                     logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {existing_record['grade'] or 'NULL'} -> {new_grade}")
                     grade_updates_to_insert.append((camis, existing_record['grade'], new_grade, 'finalized', inspection_date))
@@ -167,7 +188,7 @@ def update_database_batch(data):
             upsert_sql = """
                 INSERT INTO restaurants (camis, dba, dba_normalized_search, boro, building, street, zipcode, phone, latitude, longitude, grade, inspection_date, critical_flag, inspection_type, cuisine_description, grade_date, action)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
-                ON CONFLICT (camis, inspection_date) DO UPDATE SET dba = EXCLUDED.dba, dba_normalized_search = EXCLUDED.dba_normalized_search, boro = EXCLUDED.boro, grade = EXCLUDED.grade, critical_flag = EXCLUDED.critical_flag, action = EXCLUDED.action;
+                ON CONFLICT (camis, inspection_date) DO UPDATE SET dba = EXCLUDED.dba, dba_normalized_search = EXCLUDED.dba_normalized_search, boro = EXCLUDED.boro, building = EXCLUDED.building, street = EXCLUDED.street, zipcode = EXCLUDED.zipcode, phone = EXCLUDED.phone, latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude, grade = EXCLUDED.grade, critical_flag = EXCLUDED.critical_flag, inspection_type = EXCLUDED.inspection_type, cuisine_description = EXCLUDED.cuisine_description, grade_date = EXCLUDED.grade_date, action = EXCLUDED.action;
             """
             cursor.executemany(upsert_sql, restaurants_to_update)
             r_count = cursor.rowcount
@@ -187,7 +208,6 @@ def update_database_batch(data):
 
         conn.commit()
     return r_count, v_count, u_count
-
 def run_database_update(days_back=3):
     logger.info(f"Starting DB update (days_back={days_back})")
     data = fetch_data(days_back)
