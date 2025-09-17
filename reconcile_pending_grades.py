@@ -1,11 +1,10 @@
-# In file: reconcile_pending_grades.py (Optimized with Batching)
+# In file: reconcile_pending_grades.py (Corrected for modern psycopg library)
 
 import logging
 from datetime import datetime
 import requests
 import psycopg
 from psycopg.rows import dict_row
-from psycopg.extras import execute_values
 
 from db_manager import DatabaseConnection, DatabaseManager
 from config import APIConfig
@@ -29,8 +28,6 @@ def fetch_live_inspection_data_batch(stale_records_batch):
     if not stale_records_batch:
         return {}
 
-    # Create a SoQL IN clause for all records in the batch
-    # e.g., (camis='123' AND inspection_date='2023-01-01T00:00:00') OR (...)
     where_clauses = []
     for record in stale_records_batch:
         camis = record['camis']
@@ -41,7 +38,7 @@ def fetch_live_inspection_data_batch(stale_records_batch):
     
     api_params = {
         "$where": soql_filter,
-        "$limit": len(stale_records_batch) * 2 # Fetch more to account for multiple violations per inspection
+        "$limit": len(stale_records_batch) * 2
     }
     
     try:
@@ -49,7 +46,6 @@ def fetch_live_inspection_data_batch(stale_records_batch):
         response.raise_for_status()
         live_data = response.json()
         
-        # Process the response into a helpful dictionary
         live_grades = {}
         for item in live_data:
             camis = item.get('camis')
@@ -63,7 +59,6 @@ def fetch_live_inspection_data_batch(stale_records_batch):
     except requests.exceptions.RequestException as e:
         logger.warning(f"API batch request failed: {e}")
         return {}
-
 
 def run_reconciliation():
     logger.info("Starting reconciliation of stale 'Pending' grades with batching...")
@@ -88,7 +83,6 @@ def run_reconciliation():
             records_to_update = []
             grade_updates_to_log = []
 
-            # Process records in batches
             for i in range(0, len(stale_records), BATCH_SIZE):
                 batch = stale_records[i:i + BATCH_SIZE]
                 logger.info(f"Processing batch {i//BATCH_SIZE + 1}/{(len(stale_records) + BATCH_SIZE - 1)//BATCH_SIZE}...")
@@ -111,15 +105,14 @@ def run_reconciliation():
                 logger.info("No stale records needed updating after checking the live API.")
                 return
             
-            # Perform bulk updates at the end
             logger.info(f"Updating {len(records_to_update)} records in the 'restaurants' table...")
             update_restaurants_sql = "UPDATE restaurants SET grade = %s WHERE camis = %s AND inspection_date::date = %s;"
-            execute_values(cursor, update_restaurants_sql, records_to_update, page_size=500)
+            cursor.executemany(update_restaurants_sql, records_to_update)
             logger.info(f"Successfully updated {len(records_to_update)} restaurant records.")
 
             logger.info(f"Logging {len(grade_updates_to_log)} events in the 'grade_updates' table...")
-            update_log_sql = "INSERT INTO grade_updates (restaurant_camis, previous_grade, new_grade, update_type, inspection_date) VALUES %s;"
-            execute_values(cursor, update_log_sql, grade_updates_to_log, page_size=500)
+            update_log_sql = "INSERT INTO grade_updates (restaurant_camis, previous_grade, new_grade, update_type, inspection_date) VALUES (%s, %s, %s, %s, %s);"
+            cursor.executemany(update_log_sql, grade_updates_to_log)
             logger.info(f"Successfully logged {len(grade_updates_to_log)} grade update events.")
             
             conn.commit()
