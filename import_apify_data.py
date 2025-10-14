@@ -1,9 +1,8 @@
-# In file: import_apify_data.py (Corrected for Name/Location Matching)
+# In file: import_apify_data.py (Final Version for Place ID Matching)
 
 import json
 import logging
 from db_manager import DatabaseConnection, DatabaseManager
-from psycopg.rows import dict_row
 
 # --- Logger Setup ---
 logger = logging.getLogger(__name__)
@@ -14,68 +13,50 @@ if not logger.hasHandlers():
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
+# --- IMPORTANT: Change this to the new JSON file name ---
+JSON_FILE_NAME = 'dataset_crawler-google-places_2025-10-14_17-10-10-953.json'
+
 def run_import():
     """
-    Reads the Apify JSON output and updates the database by matching on name and location.
+    Reads the Apify JSON output and updates the database with the scraped data
+    by matching on the unique 'placeId'.
     """
     try:
-        with open('dataset_crawler-google-places_2025-10-13_20-43-05-582.json', 'r') as f:
+        with open(JSON_FILE_NAME, 'r') as f:
             scraped_data = json.load(f)
-        logger.info(f"Successfully loaded {len(scraped_data)} records from the JSON file.")
+        logger.info(f"Successfully loaded {len(scraped_data)} records from '{JSON_FILE_NAME}'.")
     except FileNotFoundError:
-        logger.error("ERROR: The JSON file was not found.")
+        logger.error(f"ERROR: The file '{JSON_FILE_NAME}' was not found.")
         return
     except json.JSONDecodeError:
         logger.error("ERROR: The JSON file is not formatted correctly.")
         return
 
     update_records = []
-    
-    with DatabaseConnection() as conn, conn.cursor(row_factory=dict_row) as cursor:
-        logger.info("Matching scraped data to database records...")
-        match_count = 0
-        
-        for item in scraped_data:
-            scraped_title = item.get('title')
-            # The 'city' in the JSON can sometimes be the neighborhood, so we check both.
-            scraped_location = item.get('city') or item.get('neighborhood')
+    for item in scraped_data:
+        google_place_id = item.get('placeId')
+        if not google_place_id:
+            continue
 
-            if not scraped_title or not scraped_location:
-                continue
-
-            # Find a matching restaurant in the database based on name and boro/city
-            cursor.execute("""
-                SELECT camis FROM restaurants 
-                WHERE dba ILIKE %s AND boro ILIKE %s
-                LIMIT 1;
-            """, (f'%{scraped_title}%', f'%{scraped_location}%'))
-            
-            match = cursor.fetchone()
-
-            if match:
-                match_count += 1
-                camis_to_update = match['camis']
-                
-                # Prepare the data for the UPDATE statement
-                update_records.append((
-                    item.get('totalScore'),
-                    item.get('reviewsCount'),
-                    item.get('website'),
-                    json.dumps(item.get('openingHours')),
-                    item.get('url'),
-                    item.get('price'),
-                    camis_to_update
-                ))
+        update_records.append((
+            item.get('totalScore'),
+            item.get('reviewsCount'),
+            item.get('website'),
+            json.dumps(item.get('openingHours')),
+            item.get('url'),
+            item.get('price'),
+            google_place_id
+        ))
 
     if not update_records:
-        logger.warning("Could not match any of the scraped records to the database. Nothing to import.")
+        logger.warning("No records with a 'placeId' found in the JSON file. Nothing to import.")
         return
 
-    logger.info(f"Successfully matched {match_count} records. Preparing to update database...")
+    logger.info(f"Prepared {len(update_records)} records to be updated in the database.")
 
     try:
         with DatabaseConnection() as conn, conn.cursor() as cursor:
-            # We now use the CAMIS to update all rows for that restaurant
+            # This query is much more efficient as it updates all rows for a given place ID at once.
             update_sql = """
                 UPDATE restaurants
                 SET
@@ -85,11 +66,11 @@ def run_import():
                     hours = %s::jsonb,
                     google_maps_url = %s,
                     price_level = %s
-                WHERE camis = %s;
+                WHERE google_place_id = %s;
             """
             cursor.executemany(update_sql, update_records)
             conn.commit()
-            logger.info(f"Successfully updated data for {cursor.rowcount} restaurant rows in the database.")
+            logger.info(f"Successfully updated {cursor.rowcount} restaurant rows in the database.")
     except Exception as e:
         logger.error(f"A database error occurred during the update: {e}")
 
