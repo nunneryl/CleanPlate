@@ -21,7 +21,7 @@ if not logger.hasHandlers():
 APIFY_API_TOKEN = 'apify_api_TRJ8FvvJyrS1A1W01GiMzsc25kyGN04zROiD' # Find in your Apify account settings -> Integrations
 # This is the ID of your 'Google Maps Scraper' actor.
 # You can find it in the Apify console URL (e.g., .../actors/XYZ/...)
-ACTOR_ID = 'apify/google-maps-scraper'
+ACTOR_ID = 'apify~google-maps-scraper'
 
 def fetch_restaurants_to_enrich(limit=500):
     """
