@@ -80,7 +80,7 @@ def main():
         logger.error(f"Failed to initialize Google Provider: {e}")
         return
 
-    restaurants_to_process = fetch_restaurants_to_enrich(limit=500)
+    restaurants_to_process = fetch_restaurants_to_enrich(limit=5000)
     total_count = len(restaurants_to_process)
     success_count = 0
     fail_count = 0
