@@ -3,6 +3,9 @@
 import os
 import requests
 import logging
+from dotenv import load_dotenv # ADD THIS LINE
+
+load_dotenv() # AND ADD THIS LINE
 
 class GoogleProvider:
     def __init__(self):
