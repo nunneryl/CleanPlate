@@ -144,7 +144,7 @@ def main():
 
                     # Commit after each restaurant's processing (API call + DB update + timestamp update)
                     conn.commit()
-                    time.sleep(0.1) # Small delay
+                    time.sleep(0.5) # Small delay
 
     except Exception as e:
         logger.error(f"An unexpected error occurred during the main process: {e}", exc_info=True)
