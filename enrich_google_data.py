@@ -15,7 +15,7 @@ if not logger.hasHandlers():
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
-def fetch_restaurants_to_enrich(conn, limit=250): # Default limit for weekly runs
+def fetch_restaurants_to_enrich(conn, limit=500): # Default limit for weekly runs
     """
     Fetches restaurants that need enrichment, prioritizing those never attempted
     or whose last attempt was more than 90 days ago.
@@ -27,7 +27,7 @@ def fetch_restaurants_to_enrich(conn, limit=250): # Default limit for weekly run
         WHERE google_place_id IS NOT NULL
         AND google_rating IS NULL
         AND (enrichment_last_attempted IS NULL OR enrichment_last_attempted < NOW() - INTERVAL '90 days')
-        GROUP BY camis, google_place_id
+        GROUP BY camis, google_place_id, enrichment_last_attempted -- <<< ADDED enrichment_last_attempted HERE
         ORDER BY enrichment_last_attempted ASC NULLS FIRST, MAX(inspection_date) DESC
         LIMIT %s;
     """
