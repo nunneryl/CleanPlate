@@ -12,11 +12,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 def get_unmatched_restaurants(conn, limit=1000):
     """
-    Fetches a batch of unique restaurants that need a Google Place ID, 
+    Fetches a batch of unique restaurants that need a Google Place ID,
     prioritizing those that have never been checked, then those whose last check has expired.
     """
     logging.info(f"Fetching a batch of up to {limit} restaurants to check for Google Place IDs...")
-    
+
     # This updated query implements the "cooldown" logic.
     query = """
         WITH latest_inspections AS (
@@ -24,20 +24,20 @@ def get_unmatched_restaurants(conn, limit=1000):
             FROM public.restaurants
         ),
         latest_unique_restaurants AS (
-            SELECT camis, dba, building, street, latitude, longitude, google_id_last_checked
-            FROM latest_inspections 
+            SELECT camis, dba, building, street, latitude, longitude, google_id_last_checked, google_place_id, inspection_date -- <<< ADDED inspection_date HERE
+            FROM latest_inspections
             WHERE rn = 1
         )
-        SELECT 
+        SELECT
             camis, dba, building, street, latitude, longitude
-        FROM 
+        FROM
             latest_unique_restaurants
-        WHERE 
+        WHERE
             google_place_id IS NULL AND
             (google_id_last_checked IS NULL OR google_id_last_checked < NOW() - INTERVAL '90 days')
-        ORDER BY 
+        ORDER BY
             google_id_last_checked ASC NULLS FIRST, -- Prioritize ones we've never checked
-            inspection_date DESC
+            inspection_date DESC -- <<< This line can now correctly reference the column
         LIMIT %s;
     """
     with conn.cursor() as cur:
