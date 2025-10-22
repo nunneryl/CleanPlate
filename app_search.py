@@ -128,7 +128,6 @@ def make_user_cache_key(*args, **kwargs):
     return request.path
 
 # --- PUBLIC API ENDPOINTS ---
-
 @app.route('/search', methods=['GET'])
 @cache.cached(timeout=3600, query_string=True)
 def search():
