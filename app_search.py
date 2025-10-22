@@ -53,6 +53,8 @@ except Exception as e:
     redis_client = None
 
 # --- Custom JSON Encoder ---
+from decimal import Decimal
+
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, date):
