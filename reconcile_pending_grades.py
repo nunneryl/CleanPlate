@@ -1,4 +1,4 @@
-# In file: reconcile_pending_grades.py (Corrected for modern psycopg library)
+# In file: reconcile_pending_grades.py (Corrected with Historical Dates)
 
 import logging
 from datetime import datetime
@@ -12,7 +12,7 @@ from config import APIConfig
 # --- Constants ---
 PENDING_GRADES = {'P', 'Z', 'N', None, ''}
 FINAL_GRADES = {'A', 'B', 'C'}
-BATCH_SIZE = 400 # Number of records to check in a single API call
+BATCH_SIZE = 400
 
 # --- Logger Setup ---
 logger = logging.getLogger(__name__)
@@ -22,6 +22,14 @@ if not logger.hasHandlers():
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
+
+def convert_api_date(date_str):
+    """Safely converts an ISO date string from the API to a date object."""
+    if not date_str: return None
+    try:
+        return datetime.fromisoformat(date_str).date()
+    except (ValueError, TypeError):
+        return None
 
 def fetch_live_inspection_data_batch(stale_records_batch):
     """Fetches live data for a batch of records using a single API call."""
@@ -46,15 +54,16 @@ def fetch_live_inspection_data_batch(stale_records_batch):
         response.raise_for_status()
         live_data = response.json()
         
-        live_grades = {}
+        live_details = {}
         for item in live_data:
             camis = item.get('camis')
-            insp_date_str = item.get('inspection_date')
+            insp_date = convert_api_date(item.get('inspection_date'))
             grade = item.get('grade')
-            if camis and insp_date_str and grade:
-                insp_date = datetime.fromisoformat(insp_date_str).date()
-                live_grades[(camis, insp_date)] = grade
-        return live_grades
+            grade_date = convert_api_date(item.get('grade_date'))
+            
+            if camis and insp_date and grade:
+                live_details[(camis, insp_date)] = (grade, grade_date)
+        return live_details
         
     except requests.exceptions.RequestException as e:
         logger.warning(f"API batch request failed: {e}")
@@ -87,31 +96,36 @@ def run_reconciliation():
                 batch = stale_records[i:i + BATCH_SIZE]
                 logger.info(f"Processing batch {i//BATCH_SIZE + 1}/{(len(stale_records) + BATCH_SIZE - 1)//BATCH_SIZE}...")
                 
-                live_grades_batch = fetch_live_inspection_data_batch(batch)
+                live_details_batch = fetch_live_inspection_data_batch(batch)
                 
                 for record in batch:
                     camis = record['camis']
                     inspection_date = record['inspection_date'].date()
                     previous_grade = record['grade']
                     
-                    live_grade = live_grades_batch.get((camis, inspection_date))
+                    live_data = live_details_batch.get((camis, inspection_date))
 
-                    if live_grade and live_grade in FINAL_GRADES and previous_grade in PENDING_GRADES:
-                        logger.info(f"  -> Update Found for CAMIS {camis} on {inspection_date}: {previous_grade or 'NULL'} -> {live_grade}")
-                        records_to_update.append((live_grade, camis, inspection_date))
-                        grade_updates_to_log.append((camis, previous_grade, live_grade, 'finalized', inspection_date))
+                    if live_data:
+                        live_grade, live_grade_date = live_data
+                        if live_grade in FINAL_GRADES and previous_grade in PENDING_GRADES:
+                            logger.info(f"  -> Update Found for CAMIS {camis} on {inspection_date}: {previous_grade or 'NULL'} -> {live_grade}")
+                            records_to_update.append((live_grade, live_grade_date, camis, inspection_date))
+                            
+                            # Use the official grade_date as the update_date for the log
+                            update_date_for_log = live_grade_date if live_grade_date else inspection_date
+                            grade_updates_to_log.append((camis, previous_grade, live_grade, 'finalized', update_date_for_log, inspection_date))
 
             if not records_to_update:
                 logger.info("No stale records needed updating after checking the live API.")
                 return
             
             logger.info(f"Updating {len(records_to_update)} records in the 'restaurants' table...")
-            update_restaurants_sql = "UPDATE restaurants SET grade = %s WHERE camis = %s AND inspection_date::date = %s;"
+            update_restaurants_sql = "UPDATE restaurants SET grade = %s, grade_date = %s WHERE camis = %s AND inspection_date::date = %s;"
             cursor.executemany(update_restaurants_sql, records_to_update)
             logger.info(f"Successfully updated {len(records_to_update)} restaurant records.")
 
             logger.info(f"Logging {len(grade_updates_to_log)} events in the 'grade_updates' table...")
-            update_log_sql = "INSERT INTO grade_updates (restaurant_camis, previous_grade, new_grade, update_type, inspection_date) VALUES (%s, %s, %s, %s, %s);"
+            update_log_sql = "INSERT INTO grade_updates (restaurant_camis, previous_grade, new_grade, update_type, update_date, inspection_date) VALUES (%s, %s, %s, %s, %s, %s);"
             cursor.executemany(update_log_sql, grade_updates_to_log)
             logger.info(f"Successfully logged {len(grade_updates_to_log)} grade update events.")
             
@@ -123,7 +137,6 @@ def run_reconciliation():
         logger.error(f"An unexpected error occurred: {e}")
 
     logger.info("Reconciliation process complete.")
-
 
 if __name__ == '__main__':
     DatabaseManager.initialize_pool()
