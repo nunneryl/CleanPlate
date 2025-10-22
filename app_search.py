@@ -97,7 +97,6 @@ def _shape_simple_restaurant_list(rows):
     return shaped_results
 
 # --- SECURITY & AUTH HELPERS (UPDATED) ---
-
 def verify_apple_token(token):
     try:
         logger.warning("SECURITY ALERT: Token signature verification is NOT IMPLEMENTED. This is insecure.")
