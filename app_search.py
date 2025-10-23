@@ -1,4 +1,4 @@
-# In file: PREVIEW_app_search.py (Corrected with GROUP BY)
+# In file: PREVIEW_app_search.py (Corrected Outer ORDER BY)
 
 import logging
 from datetime import datetime, date
@@ -46,7 +46,6 @@ cache_config = {
 }
 app.config.from_mapping(cache_config)
 cache = Cache(app)
-# --- END CACHE CORRECTION ---
 
 # --- Custom JSON Encoder ---
 class CustomJSONEncoder(json.JSONEncoder):
@@ -183,40 +182,62 @@ def search_restaurants():
     
     where_sql_for_subquery = " AND ".join(where_clauses)
     
-    order_by_sql_parts = []; sort_params_list = []
-    # Start GROUP BY with camis. We'll add dba if needed for sorting.
+    # --- *** FIX: Create separate ORDER BY lists for subquery and outer query *** ---
+    subquery_order_by_parts = [] # For subquery (uses aggregates)
+    outer_order_by_parts = []    # For outer query (no aggregates)
+    sort_params_list = []
+    
     group_by_sql_parts = ["r_inner.camis"]
     
     if normalized_query and sort_param == 'relevance':
-        # Use MAX(similarity) to get the best match for that camis
-        relevance_agg = "MAX(similarity(r_inner.dba_normalized_search, %s))"
-        order_by_sql_parts.append(f"{relevance_agg} DESC")
+        subquery_order_by_parts.append("MAX(similarity(r_inner.dba_normalized_search, %s)) DESC")
+        outer_order_by_parts.append("similarity(r.dba_normalized_search, %s) DESC")
         sort_params_list.append(normalized_query)
     
-    sort_field = "r_inner.inspection_date"; sort_direction = "DESC"
+    # Define sort fields
+    sort_field_inner = "r_inner.inspection_date"
+    sort_field_outer = "r.inspection_date"
+    sort_direction = "DESC"
     agg_func = "MAX" # Get the most recent inspection date
     
     if sort_param == 'date_asc':
-        sort_direction = "ASC"; agg_func = "MIN" # Get the oldest
+        sort_direction = "ASC"
+        agg_func = "MIN" # Get the oldest
     elif sort_param == 'name_asc':
-        sort_field = "r_inner.dba"; sort_direction = "ASC"; agg_func = "" # No agg needed, will be in GROUP BY
+        sort_field_inner = "r_inner.dba"
+        sort_field_outer = "r.dba"
+        sort_direction = "ASC"
+        agg_func = "" # No agg needed, will be in GROUP BY
     elif sort_param == 'name_desc':
-        sort_field = "r_inner.dba"; sort_direction = "DESC"; agg_func = "" # No agg needed
+        sort_field_inner = "r_inner.dba"
+        sort_field_outer = "r.dba"
+        sort_direction = "DESC"
+        agg_func = "" # No agg needed
 
     # Add dba to GROUP BY if we are sorting by it
-    if "dba" in sort_field and "r_inner.dba" not in group_by_sql_parts:
-        group_by_sql_parts.append("r_inner.dba")
+    if "dba" in sort_field_inner and sort_field_inner not in group_by_sql_parts:
+        group_by_sql_parts.append(sort_field_inner)
 
+    # Add to subquery list
     if agg_func:
-        order_by_sql_parts.append(f"{agg_func}({sort_field}) {sort_direction}")
+        subquery_order_by_parts.append(f"{agg_func}({sort_field_inner}) {sort_direction}")
     else:
-        # Sort field is already in the GROUP BY clause
-        order_by_sql_parts.append(f"{sort_field} {sort_direction}")
-
-    order_by_sql_parts.append("r_inner.camis") # Final tie-breaker
+        subquery_order_by_parts.append(f"{sort_field_inner} {sort_direction}")
     
-    order_by_sql_for_subquery = ", ".join(order_by_sql_parts)
+    # Add to outer query list
+    outer_order_by_parts.append(f"{sort_field_outer} {sort_direction}")
+
+    # Add Final Tie-breakers
+    subquery_order_by_parts.append("r_inner.camis")
+    outer_order_by_parts.append("r.camis")
+    
+    # *** ADDITION: Sort inspections within the restaurant for the outer query ***
+    outer_order_by_parts.append("r.inspection_date DESC")
+    
+    # Join them into strings
     group_by_sql_for_subquery = ", ".join(group_by_sql_parts)
+    order_by_sql_for_subquery = ", ".join(subquery_order_by_parts)
+    order_by_sql_for_outer_query = ", ".join(outer_order_by_parts)
     # --- End clause building ---
 
     # --- Construct the SQL query using GROUP BY ---
@@ -233,10 +254,10 @@ def search_restaurants():
         JOIN restaurants r ON paged_restaurants.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
         WHERE {where_sql_for_subquery.replace('r_inner.', 'r.')}
-        ORDER BY {order_by_sql_for_subquery.replace('r_inner.', 'r.')}, r.inspection_date DESC;
+        ORDER BY {order_by_sql_for_outer_query};
     """
 
-    # --- Build the final parameter tuple (this was correct in your last version) ---
+    # --- Build the final parameter tuple ---
     final_params_list = []
     final_params_list.extend(params_list)      # For subquery WHERE
     final_params_list.extend(sort_params_list) # For subquery ORDER BY
@@ -257,19 +278,8 @@ def search_restaurants():
         return jsonify({"error": "Search failed"}), 500
 
     # --- Determine ordered CAMIS list for grouping (like PRODUCTION) ---
-    ordered_camis = []; seen_camis = set()
+    ordered_camis = []
     if all_rows:
-        for row in all_rows:
-            camis_str = str(row['camis'])
-            if camis_str not in seen_camis:
-                ordered_camis.append(camis_str)
-                seen_camis.add(camis_str)
-                # The LIMIT is now correctly applied in the SQL subquery
-                # But we still need this to preserve the order for grouping
-        
-        # This logic is flawed if LIMIT is hit mid-restaurant
-        # Let's get the camis list from the subquery result directly
-        
         # New logic to get ordered_camis
         camis_set_in_order = set()
         ordered_camis_list = []
@@ -280,8 +290,8 @@ def search_restaurants():
                 ordered_camis_list.append(camis_str)
         
         ordered_camis = ordered_camis_list # Use this ordered list
-
-    else: all_rows = []
+    else:
+        all_rows = []
 
     # --- Use the production _group_and_shape_results ---
     grouped_data = _group_and_shape_results(all_rows, ordered_camis)
@@ -307,7 +317,7 @@ def get_restaurant_details(camis):
 @cache.cached(timeout=3600, query_string=True) # Decorator handles cache
 def get_recently_graded():
     limit = request.args.get('limit', 50, type=int); offset = request.args.get('offset', 0, type=int)
-    sql = """ WITH RankedInspections AS ( SELECT r.*, ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn FROM restaurants r WHERE r.grade IS NOT NULL AND r.grade NOT IN ('', 'N', 'Z', 'P') AND r.grade_date IS NOT NULL ) SELECT * FROM RankedInspections WHERE rn = 1 ORDER BY grade_date DESC, inspection_date DESC LIMIT %s OFFSET %s; """
+    sql = """ WITH RankedInspections AS ( SELECT r.*, ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn FROM restaurants r WHERE r.grade IS NOT NULL AND r.grade NOT IN ('', 'N', 'Z', 'P') AND r.grade_date IS NOTNULL ) SELECT * FROM RankedInspections WHERE rn = 1 ORDER BY grade_date DESC, inspection_date DESC LIMIT %s OFFSET %s; """
     results = _execute_query(sql, (limit, offset)) # No use_cache
     shaped_results = [dict(row) for row in results] if results else []
     return jsonify(shaped_results)
@@ -367,5 +377,6 @@ if __name__ == '__main__':
     try: DatabaseManager.initialize_pool(); logger.info("Database pool initialized successfully.")
     except Exception as e: logger.critical(f"Failed to initialize database pool on startup: {e}", exc_info=True); exit(1)
     logger.info(f"Starting Flask app on {APIConfig.HOST}:{APIConfig.PORT} with DEBUG={APIConfig.DEBUG}")
-    app.run(host=APIConfig.HOST, port=APIWebConfig.PORT, debug=APIConfig.DEBUG)
+    # --- FIX: Corrected typo from APIWebConfig to APIConfig ---
+    app.run(host=APIConfig.HOST, port=APIConfig.PORT, debug=APIConfig.DEBUG)
 
