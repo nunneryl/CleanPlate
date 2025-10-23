@@ -285,6 +285,7 @@ def get_recently_graded():
 
     return jsonify(shaped_results)
 
+@app.route('/lists/recent-actions', methods=['GET'])
 @app.route('/grade-updates', methods=['GET'])
 def get_grade_updates():
     limit = request.args.get('limit', 50, type=int)
