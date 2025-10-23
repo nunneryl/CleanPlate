@@ -261,8 +261,7 @@ def search_restaurants():
     params_tuple = tuple(final_params_list)
 
     try:
-        # Pass use_cache=False because decorator handles it
-        all_rows = _execute_query(sql, params_tuple, use_cache=False)
+        all_rows = _execute_query(sql, params_tuple)
     except Exception as e:
          logger.error(f"Search query failed: {e}", exc_info=True)
          return jsonify({"error": "Search failed", "details": str(e)}), 500
@@ -305,8 +304,7 @@ def get_restaurant_details(camis):
         ORDER BY r.inspection_date DESC;
     """
     params = (camis,)
-    # use_cache=False because decorator handles it
-    rows = _execute_query(sql, params, use_cache=False)
+    rows = _execute_query(sql, params)
 
     if not rows:
         abort(404, description="Restaurant not found.")
@@ -341,7 +339,7 @@ def get_recently_graded():
         LIMIT %s OFFSET %s;
     """
     params = (limit, offset)
-    results = _execute_query(sql, params, use_cache=False) # Decorator handles cache
+    results = _execute_query(sql, params)
 
     # Production shaping seems different, let's use a simpler version
     # matching the original preview logic but keeping enriched fields if needed
@@ -433,7 +431,7 @@ def get_grade_updates():
              LIMIT %s OFFSET %s;
          """
 
-    results = _execute_query(sql, tuple(params), use_cache=False) # Decorator handles cache
+    results = _execute_query(sql, tuple(params))
 
     # Shape results: Convert rows to simple dicts, add update_type for clarity
     shaped_results = []
