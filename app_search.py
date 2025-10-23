@@ -146,61 +146,73 @@ def _group_and_shape_results(rows):
     return sorted(list(restaurants.values()), key=lambda x: x['inspection_date'], reverse=True)
 
 # --- API Routes ---
+
 @app.route('/search', methods=['GET'])
 def search_restaurants():
-    query = request.args.get('q', '').strip()
-    limit = request.args.get('limit', 20, type=int)
-    offset = request.args.get('offset', 0, type=int)
+    query = request.args.get('q', '').strip() # Changed 'name' back to 'q' if that's what your iOS uses
+    limit = request.args.get('limit', 20, type=int) # Changed 'per_page' back to 'limit'
+    page = request.args.get('page', 1, type=int) # Added page handling
+    offset = (page - 1) * limit
 
     if not query:
+        logger.info("Search request with no query, returning empty.")
         return jsonify([]) # Return empty list if no query
 
     normalized_query = normalize_search_term_for_hybrid(query)
     # Use cache key including query, limit, and offset
-    cache_key = f"search:{normalized_query}:limit:{limit}:offset:{offset}"
+    cache_key = f"search:{normalized_query}:limit:{limit}:offset:{offset}" # Corrected key formatting
 
+    # --- Use the existing SQL query from your file ---
     sql = """
         SELECT DISTINCT ON (r.camis)
             r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
             r.cuisine_description, r.inspection_date, r.action, r.critical_flag,
             r.grade, r.grade_date, r.inspection_type, r.latitude, r.longitude,
-             -- NEW: Include rating for search results
+            -- Include rating for search results
             r.google_rating
-             -- END NEW
         FROM restaurants r
         WHERE r.dba_normalized_search LIKE %s OR r.dba ILIKE %s
         ORDER BY r.camis, r.inspection_date DESC
         LIMIT %s OFFSET %s;
     """
-    # Using 'like' for broader matching, adjust as needed
+    # Use parameters exactly as in your original file
     params = (f"%{normalized_query}%", f"%{query}%", limit, offset)
 
-    # Use cache for search results, TTL 1 hour (3600 seconds)
+    # Use cache for search results (as in your original _execute_query)
     results = _execute_query(sql, params, use_cache=True, cache_key=cache_key, cache_ttl=3600)
 
-    # Simplified shaping for search results (no violation grouping needed)
-    shaped_results = [{
-        'camis': row['camis'],
-        'dba': row['dba'],
-        'boro': row['boro'],
-        'building': row['building'],
-        'street': row['street'],
-        'zipcode': row['zipcode'],
-        'phone': row['phone'],
-        'cuisine_description': row['cuisine_description'],
-        'latest_inspection_date': row['inspection_date'],
-        'latest_action': row['action'],
-        'latest_critical_flag': row['critical_flag'],
-        'latest_grade': row['grade'],
-        'latest_grade_date': row['grade_date'],
-        'latest_inspection_type': row['inspection_type'],
-        'latitude': row['latitude'],
-        'longitude': row['longitude'],
-        # --- NEW: Add rating to response ---
-        'google_rating': row['google_rating']
-        # --- END NEW ---
-    } for row in results]
+    # Check if results is None before iterating
+    if results is None:
+        logger.warning(f"Search query returned None for query: {query}")
+        return jsonify([]) # Return empty if DB error occurred
 
+    shaped_results = []
+    for row in results:
+        shaped_results.append({
+            # Map keys exactly as expected by Models.swift based on your original file
+            'camis': row['camis'],
+            'dba': row['dba'],
+            'boro': row['boro'],
+            'building': row['building'],
+            'street': row['street'],
+            'zipcode': row['zipcode'],
+            'phone': row['phone'],
+            'cuisine_description': row['cuisine_description'], # Keep snake_case
+            # Send the latest inspection details directly
+            'inspection_date': row['inspection_date'], # Keep snake_case
+            'action': row['action'],
+            'critical_flag': row['critical_flag'], # Keep snake_case
+            'grade': row['grade'],
+            'grade_date': row['grade_date'], # Keep snake_case
+            'inspection_type': row['inspection_type'], # Keep snake_case
+            'latitude': row['latitude'],
+            'longitude': row['longitude'],
+            'google_rating': row['google_rating'] # Keep snake_case
+            # Note: We are NOT sending the 'inspections' array here
+            # Note: We are NOT sending other enriched fields like hours/website for search results
+        })
+        
+    logger.info(f"Search for '{query}' returned {len(shaped_results)} results.")
     return jsonify(shaped_results)
 
 @app.route('/restaurant/<string:camis>', methods=['GET'])
