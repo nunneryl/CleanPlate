@@ -1,13 +1,13 @@
-# In file: PREVIEW_app_search.py (Corrected)
+# In file: PREVIEW_app_search.py (Corrected with View-Level Caching)
 
 import logging
 from datetime import datetime, date
 import json
-import redis # Keep Redis import if used elsewhere, though Flask-Caching handles connection now
+import redis # Keep Redis import
 from decimal import Decimal # Keep Decimal import for JSON encoding
 from flask import Flask, jsonify, request, abort, Response
-from flask_cors import CORS # Import CORS
-from flask_caching import Cache # Import Cache
+from flask_cors import CORS # Import CORS from Production
+from flask_caching import Cache # Import Cache from Production
 import psycopg # Keep psycopg import
 from psycopg.rows import dict_row
 from db_manager import DatabaseConnection, DatabaseManager # Keep db_manager import
@@ -16,19 +16,15 @@ from utils import normalize_search_term_for_hybrid # Keep utils import
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
 from werkzeug.exceptions import HTTPException
-import os # Import os for environment variables
-import secrets # Import secrets for security
-import threading # Import threading if run_database_update is used
+import os # Import os like Production
+import secrets # Import secrets like Production
+import threading # Import threading like Production
 
-
-# --- Sentry Initialization (Keep as is) ---
+# --- Sentry Initialization (Keep as is from Preview file) ---
 if SentryConfig.SENTRY_DSN:
     sentry_sdk.init(
-        dsn=SentryConfig.SENTRY_DSN,
-        integrations=[FlaskIntegration()],
-        traces_sample_rate=1.0, # Adjust in production
-        profiles_sample_rate=1.0, # Adjust in production
-        send_default_pii=True # Be mindful of PII
+        dsn=SentryConfig.SENTRY_DSN, integrations=[FlaskIntegration()],
+        traces_sample_rate=1.0, profiles_sample_rate=1.0, send_default_pii=True
     )
     logging.info("Sentry initialized.")
 else:
@@ -43,125 +39,139 @@ app = Flask(__name__)
 CORS(app) # Enable CORS like production
 
 # --- CORRECTED CACHE CONFIGURATION (Match Production) ---
-# Use Redis URL directly from environment for Flask-Caching
 cache_config = {
     "CACHE_TYPE": "RedisCache",
-    "CACHE_REDIS_URL": os.environ.get('REDIS_URL'), # Get URL from environment
-    "CACHE_DEFAULT_TIMEOUT": 300 # Default timeout like production
+    "CACHE_REDIS_URL": os.environ.get('REDIS_URL'), # Get URL from environment like Production
+    "CACHE_DEFAULT_TIMEOUT": 300 # Default timeout like Production
 }
 app.config.from_mapping(cache_config)
-cache = Cache(app) # Initialize Cache AFTER app config is set
+cache = Cache(app) # Initialize Cache AFTER app config is set (like Production)
 # --- END CACHE CORRECTION ---
 
-# --- Custom JSON Encoder (Keep as is) ---
+# --- Custom JSON Encoder (Keep as is from Preview file) ---
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, date):
-            return obj.isoformat()
-        if isinstance(obj, Decimal):
-            return float(obj)
+        if isinstance(obj, date): return obj.isoformat()
+        if isinstance(obj, Decimal): return float(obj)
         return super().default(obj)
-
 app.json_encoder = CustomJSONEncoder
 
 # --- Helper Functions ---
 
-# _execute_query: Use simpler version WITHOUT manual caching, rely on decorator
+# _execute_query: Match Production structure (NO cache logic, NO use_cache param)
 def _execute_query(sql, params=None, fetch_one=False):
     """Executes a SQL query."""
     try:
         with DatabaseConnection() as conn, conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(sql, params)
-            if fetch_one:
-                result = cursor.fetchone()
-            else:
-                result = cursor.fetchall()
-            return result
-    except psycopg.Error as db_err:
-        logger.error(f"Database query error: {db_err}", exc_info=True)
-        # Abort within the helper to ensure consistent error handling
-        abort(500, description="Database error occurred.")
-    except Exception as e:
-        logger.error(f"General error during query execution: {e}", exc_info=True)
-        abort(500, description="Database error occurred.")
+            # Production uses try-except around execute
+            try:
+                logger.debug(f"Executing SQL: {cursor.mogrify(sql, params).decode('utf-8') if params else sql}") # Log query
+                cursor.execute(sql, params)
+                if fetch_one: result = cursor.fetchone()
+                else: result = cursor.fetchall()
+                logger.debug(f"Query returned {len(result) if isinstance(result, list) else (1 if result else 0)} rows.")
+                return result
+            except psycopg.Error as db_err: # Catch specific DB errors like Production
+                 # Log the specific error and query details
+                 logger.error(f"Database query error during execution: {db_err} SQL: {sql} PARAMS: {params}", exc_info=True)
+                 abort(500, description="Database query error occurred during execution.")
+            except Exception as e: # Catch other potential errors during execution
+                 logger.error(f"General error during query execution: {e} SQL: {sql} PARAMS: {params}", exc_info=True)
+                 abort(500, description="General error during query execution.")
+    except psycopg.Error as conn_err: # Catch connection errors like Production
+        logger.error(f"Database connection error: {conn_err}", exc_info=True)
+        abort(500, description="Database connection error occurred.")
+    except Exception as e: # Catch other potential errors getting connection/cursor
+        logger.error(f"Error getting DB connection or cursor: {e}", exc_info=True)
+        abort(500, description="Error establishing database connection.")
 
 
 # _group_and_shape_results: Ensure this matches PRODUCTION exactly,
-# but ADD the new google fields.
+# AND includes the NEW enriched fields.
 def _group_and_shape_results(all_rows, ordered_camis):
     """Groups violations under their respective restaurant inspection."""
-    if not all_rows:
-        return []
+    if not all_rows: return []
 
-    # Use dict to group rows by camis first
+    # Use dict to group rows by camis first (like Production)
     restaurant_rows_map = {camis_str: [] for camis_str in ordered_camis}
     for row in all_rows:
-        camis_str = str(row['camis'])
+        camis_str = str(row['camis']) # Convert camis to string key like Production
         if camis_str in restaurant_rows_map:
             restaurant_rows_map[camis_str].append(row)
+        # else: # Log if a row's camis wasn't in the expected ordered list
+        #     logger.warning(f"Row found for CAMIS {camis_str} which was not in the ordered_camis list.")
+
 
     final_results = []
     for camis_str in ordered_camis:
         rows_for_camis = restaurant_rows_map.get(camis_str)
         if not rows_for_camis:
-            continue # Should not happen if logic is correct, but safe check
+            logger.warning(f"No rows found for expected CAMIS {camis_str} during shaping.")
+            continue # Skip if no rows were actually found for this camis
 
-        # Use the first row for base restaurant info (they should be the same)
-        base_info_row = rows_for_camis[0]
+        base_info_row = rows_for_camis[0] # Base info from first row
         restaurant_obj = {
-            'camis': base_info_row['camis'],
-            'dba': base_info_row['dba'],
-            'boro': base_info_row['boro'],
-            'building': base_info_row['building'],
-            'street': base_info_row['street'],
-            'zipcode': base_info_row['zipcode'],
-            'phone': base_info_row['phone'],
-            'cuisine_description': base_info_row['cuisine_description'],
-            'latitude': base_info_row['latitude'],
-            'longitude': base_info_row['longitude'],
-            'foursquare_fsq_id': base_info_row.get('foursquare_fsq_id'), # Include if selected
-            'google_place_id': base_info_row.get('google_place_id'), # Include if selected
-            # --- ADD NEW FIELDS HERE ---
-            'google_rating': base_info_row['google_rating'],
-            'google_review_count': base_info_row['google_review_count'],
-            'website': base_info_row['website'],
-            'hours': base_info_row['hours'],
-            'price_level': base_info_row['price_level'],
+            # --- Fields exactly like PRODUCTION ---
+            'camis': base_info_row['camis'], 'dba': base_info_row['dba'],
+            'boro': base_info_row['boro'], 'building': base_info_row['building'],
+            'street': base_info_row['street'], 'zipcode': base_info_row['zipcode'],
+            'phone': base_info_row['phone'], 'cuisine_description': base_info_row['cuisine_description'],
+            'latitude': base_info_row['latitude'], 'longitude': base_info_row['longitude'],
+            'foursquare_fsq_id': base_info_row.get('foursquare_fsq_id'),
+            'google_place_id': base_info_row.get('google_place_id'),
+            # --- ADD/KEEP NEW FIELDS HERE ---
+            'google_rating': base_info_row.get('google_rating'), # Use .get() for safety
+            'google_review_count': base_info_row.get('google_review_count'),
+            'website': base_info_row.get('website'),
+            'hours': base_info_row.get('hours'),
+            'price_level': base_info_row.get('price_level'),
             # --- END NEW FIELDS ---
-            'inspections': []
+            'inspections': [] # Initialize inspections list
         }
 
-        # Group inspections and violations
+        # Group inspections and violations (like Production)
         inspections_map = {}
+        processed_violation_keys = set() # Add set to prevent violation duplication like Production
+
         for row in rows_for_camis:
-            insp_date_iso = row['inspection_date'].isoformat()
-            if insp_date_iso not in inspections_map:
-                inspections_map[insp_date_iso] = {
-                    'inspection_date': row['inspection_date'],
-                    'action': row['action'],
-                    'critical_flag': row['critical_flag'],
-                    'grade': row['grade'],
-                    'grade_date': row['grade_date'],
-                    'inspection_type': row['inspection_type'],
-                    'score': row.get('score'), # Include score if selected
-                    'violations': []
-                }
+            try:
+                 # Ensure inspection_date is valid before using as key
+                 insp_date_obj = row.get('inspection_date') # Use .get() for safety
+                 if not isinstance(insp_date_obj, date):
+                      # Log or handle rows with missing/invalid inspection dates if necessary
+                      # logger.warning(f"Skipping row for CAMIS {camis_str} due to invalid inspection_date: {insp_date_obj}")
+                      continue
+                 insp_date_iso = insp_date_obj.isoformat()
 
-            # Add violation if present for this inspection row
-            if row.get('violation_code') or row.get('violation_description'):
-                 # Avoid duplicate violations if JOIN produced multiple rows for same violation
-                 violation_tuple = (row.get('violation_code'), row.get('violation_description'))
-                 existing_violations = {
-                     (v.get('violation_code'), v.get('violation_description'))
-                     for v in inspections_map[insp_date_iso]['violations']
-                 }
-                 if violation_tuple not in existing_violations:
-                     inspections_map[insp_date_iso]['violations'].append({
-                        'violation_code': row.get('violation_code'),
-                        'violation_description': row.get('violation_description')
-                    })
+                 if insp_date_iso not in inspections_map:
+                    inspections_map[insp_date_iso] = {
+                        'inspection_date': row['inspection_date'],
+                        'action': row.get('action'), # Use .get()
+                        'critical_flag': row.get('critical_flag'),
+                        'grade': row.get('grade'),
+                        'grade_date': row.get('grade_date'),
+                        'inspection_type': row.get('inspection_type'),
+                        'score': row.get('score'),
+                        'violations': []
+                    }
 
-        # Sort inspections by date descending and add to restaurant object
+                 # Add violation if present (like Production)
+                 violation_code = row.get('violation_code')
+                 violation_desc = row.get('violation_description')
+                 if violation_code or violation_desc:
+                      violation_key = (insp_date_iso, violation_code, violation_desc)
+                      if violation_key not in processed_violation_keys:
+                           inspections_map[insp_date_iso]['violations'].append({
+                                'violation_code': violation_code,
+                                'violation_description': violation_desc
+                            })
+                           processed_violation_keys.add(violation_key)
+            except Exception as e:
+                 # Log error processing a specific row but continue with others
+                 logger.error(f"Error processing row during shaping for CAMIS {camis_str}, inspection {insp_date_iso}: {e}", exc_info=True)
+
+
+        # Sort inspections by date descending (like Production)
         sorted_inspections = sorted(inspections_map.values(), key=lambda x: x['inspection_date'], reverse=True)
         restaurant_obj['inspections'] = sorted_inspections
         final_results.append(restaurant_obj)
@@ -171,10 +181,11 @@ def _group_and_shape_results(all_rows, ordered_camis):
 
 # --- API Routes ---
 
-# CORRECTED search_restaurants to match PRODUCTION logic
+# CORRECTED search_restaurants (Matches PRODUCTION logic, uses decorator)
 @app.route('/search', methods=['GET'])
-@cache.cached(timeout=300, query_string=True) # Use cache decorator
+@cache.cached(timeout=300, query_string=True) # Cache decorator applied HERE
 def search_restaurants():
+    # --- Use parameters and logic exactly like PRODUCTION ---
     query = request.args.get('name', '').strip()
     limit = request.args.get('per_page', 25, type=int)
     page = request.args.get('page', 1, type=int)
@@ -182,195 +193,165 @@ def search_restaurants():
     grade = request.args.get('grade')
     boro = request.args.get('boro')
     cuisine = request.args.get('cuisine')
-    sort_param = request.args.get('sort', 'relevance')
+    sort_param = request.args.get('sort', 'relevance') # Default like Production
 
+    # --- (Keep WHERE and ORDER BY logic exactly like Production/Previous Correct Version) ---
     if not query and not grade and not boro and not cuisine:
         logger.info("Search request with no query or filters, returning empty.")
         return jsonify([])
 
     normalized_query = normalize_search_term_for_hybrid(query) if query else None
-
     where_clauses = ["TRUE"]
     params_list = []
-
     if normalized_query:
-        where_clauses.append("(similarity(r.dba_normalized_search, %s) > 0.2 OR r.dba ILIKE %s)")
+        where_clauses.append("(similarity(r_inner.dba_normalized_search, %s) > 0.2 OR r_inner.dba ILIKE %s)")
         params_list.extend([normalized_query, f"%{query}%"])
     elif query:
-        where_clauses.append("r.dba ILIKE %s")
+        where_clauses.append("r_inner.dba ILIKE %s")
         params_list.append(f"%{query}%")
-
+    # (Add grade, boro, cuisine clauses like before, using r_inner alias)
     if grade and grade.upper() in ['A', 'B', 'C', 'P', 'Z', 'N']:
-         if grade.upper() in ['P', 'Z', 'N']:
-             where_clauses.append("r.grade IN ('P', 'Z', 'N')")
-         else:
-             where_clauses.append("r.grade = %s")
-             params_list.append(grade.upper())
+        where_clauses.append("r_inner.grade = %s" if grade.upper() in ['A','B','C'] else "r_inner.grade IN ('P', 'Z', 'N')")
+        if grade.upper() in ['A','B','C']: params_list.append(grade.upper())
     if boro and boro != 'Any':
-        where_clauses.append("r.boro = %s")
+        where_clauses.append("r_inner.boro = %s")
         params_list.append(boro.title())
     if cuisine and cuisine != 'Any':
-        where_clauses.append("r.cuisine_description = %s")
+        where_clauses.append("r_inner.cuisine_description = %s")
         params_list.append(cuisine)
 
-    where_sql = " AND ".join(where_clauses)
-
+    where_sql_for_subquery = " AND ".join(where_clauses)
     order_by_sql_parts = []
-    base_params_count = len(params_list)
-
+    sort_params_list = []
     if normalized_query and sort_param == 'relevance':
-        params_list.insert(0, normalized_query)
-        order_by_sql_parts.append("similarity(r.dba_normalized_search, %s) DESC")
+        sort_params_list.append(normalized_query)
+        order_by_sql_parts.append("similarity(r_inner.dba_normalized_search, %s) DESC")
+    sort_field = "r_inner.inspection_date"; sort_direction = "DESC"
+    if sort_param == 'date_asc': sort_direction = "ASC"
+    elif sort_param == 'name_asc': sort_field = "r_inner.dba"; sort_direction = "ASC"
+    elif sort_param == 'name_desc': sort_field = "r_inner.dba"; sort_direction = "DESC"
+    order_by_sql_parts.append(f"{sort_field} {sort_direction}"); order_by_sql_parts.append("r_inner.camis")
+    order_by_sql_for_subquery = ", ".join(order_by_sql_parts)
+    # --- (End WHERE and ORDER BY logic) ---
 
-    sort_field = "r.inspection_date"
-    sort_direction = "DESC"
-    if sort_param == 'date_asc':
-        sort_direction = "ASC"
-    elif sort_param == 'name_asc':
-        sort_field = "r.dba"
-        sort_direction = "ASC"
-    elif sort_param == 'name_desc':
-        sort_field = "r.dba"
-        sort_direction = "DESC"
-
-    order_by_sql_parts.append(f"{sort_field} {sort_direction}")
-    order_by_sql_parts.append("r.camis")
-    order_by_sql = ", ".join(order_by_sql_parts)
-
-    # Use the PRODUCTION SQL structure
+    # --- Use the exact SQL query structure from PRODUCTION ---
     sql = f"""
         SELECT r.*, v.violation_code, v.violation_description
         FROM (
             SELECT DISTINCT r_inner.camis
             FROM restaurants r_inner
-            WHERE {where_sql} -- Apply filters to find relevant CAMIS
-            ORDER BY {order_by_sql} -- Apply sort to determine which CAMIS are on this page
+            WHERE {where_sql_for_subquery} -- Apply filters using r_inner alias
+            ORDER BY {order_by_sql_for_subquery} -- Apply sort using r_inner alias
             LIMIT %s OFFSET %s
         ) AS paged_restaurants
         JOIN restaurants r ON paged_restaurants.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
-        WHERE {where_sql} -- Apply filters AGAIN to get all inspections/violations for the paged CAMIS
-        ORDER BY {order_by_sql}, r.inspection_date DESC; -- Final sort for grouping logic
+        -- Outer WHERE clause IS needed to re-apply filters (match Production)
+        WHERE {where_sql_for_subquery.replace('r_inner.', 'r.')}
+        ORDER BY {order_by_sql_for_subquery.replace('r_inner.', 'r.')}, r.inspection_date DESC;
     """
 
-    final_params_list = list(params_list) # Create a mutable list
-    # Add WHERE params again (excluding potential similarity sort param if it was added)
-    final_params_list += params_list[len(params_list)-base_params_count:]
-    final_params_list += [limit, offset] # Add LIMIT and OFFSET
-
+    # --- CORRECTED Parameter Construction (Match PRODUCTION Logic) ---
+    final_params_list = []
+    final_params_list.extend(params_list)       # Subquery WHERE params
+    final_params_list.extend(sort_params_list)  # Subquery ORDER BY params
+    final_params_list.append(limit)             # LIMIT param
+    final_params_list.append(offset)            # OFFSET param
+    final_params_list.extend(params_list)       # Outer WHERE params (duplicate required)
     params_tuple = tuple(final_params_list)
+    # --- END Parameter Correction ---
+
+    logger.debug(f"Executing search SQL (Preview): {sql}")
+    logger.debug(f"With parameters (Preview count: {len(params_tuple)}): {params_tuple}")
 
     try:
+        # Call _execute_query WITHOUT use_cache argument
         all_rows = _execute_query(sql, params_tuple)
     except Exception as e:
-         logger.error(f"Search query failed: {e}", exc_info=True)
-         return jsonify({"error": "Search failed", "details": str(e)}), 500
+         logger.error(f"Search query failed.", exc_info=True) # Keep detailed log
+         return jsonify({"error": "Search failed"}), 500 # Simple error to client
 
+    # --- Determine ordered CAMIS list for grouping (like PRODUCTION) ---
     ordered_camis = []
     seen_camis = set()
     if all_rows:
         for row in all_rows:
             camis_str = str(row['camis'])
             if camis_str not in seen_camis:
-                ordered_camis.append(camis_str)
-                seen_camis.add(camis_str)
-                # No early break needed here, let _group_and_shape_results handle filtering to ordered_camis
+                 ordered_camis.append(camis_str)
+                 seen_camis.add(camis_str)
+                 # Limit the number of unique restaurants based on 'limit' param
+                 if len(ordered_camis) >= limit:
+                      break
     else:
-        all_rows = []
+        all_rows = [] # Ensure it's a list for the next step
 
     # --- Use the production _group_and_shape_results ---
     # Ensure _group_and_shape_results includes google_rating etc.
     grouped_data = _group_and_shape_results(all_rows, ordered_camis)
 
     logger.info(f"Search for '{query}' found {len(ordered_camis)} unique restaurants, returning grouped data.")
-    return jsonify(grouped_data)
+    return jsonify(grouped_data) # Return the grouped structure from production logic
 
 
-# --- Keep /restaurant/<camis> endpoint (ensure _group_and_shape_results includes new fields) ---
+# --- Keep /restaurant/<camis> endpoint (ensure decorator is present) ---
 @app.route('/restaurant/<string:camis>', methods=['GET'])
-@cache.cached(timeout=86400, key_prefix='restaurant:%s') # Use decorator, key_prefix uses CAMIS
+@cache.cached(timeout=86400) # Decorator handles cache based on path/camis
 def get_restaurant_details(camis):
-    if not camis.isdigit():
-        abort(400, description="Invalid CAMIS format.")
+    if not camis.isdigit(): abort(400, description="Invalid CAMIS format.")
 
-    # --- Ensure ALL fields needed are selected, including NEW ones ---
+    # Select ALL columns from restaurants, plus violation info (like Production)
     sql = """
-        SELECT
-            r.*, -- Select all columns from restaurants table
-            v.violation_code, v.violation_description
+        SELECT r.*, v.violation_code, v.violation_description
         FROM restaurants r
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
         WHERE r.camis = %s
         ORDER BY r.inspection_date DESC;
     """
     params = (camis,)
+    # Call _execute_query WITHOUT use_cache argument
     rows = _execute_query(sql, params)
 
-    if not rows:
-        abort(404, description="Restaurant not found.")
+    if not rows: abort(404, description="Restaurant not found.")
 
     # Use _group_and_shape_results (ensure it handles new fields)
-    # The function expects ordered_camis, pass just this one camis
     grouped_data = _group_and_shape_results(rows, [camis])
-
-    # _group_and_shape_results returns a list, return the first (only) element
     return jsonify(grouped_data[0] if grouped_data else None)
 
 
-# --- Keep /recently-graded endpoint (ensure SELECT includes google_rating) ---
+# --- Keep /recently-graded endpoint (ensure decorator is present) ---
 @app.route('/recently-graded', methods=['GET'])
-@cache.cached(timeout=3600, query_string=True) # Use decorator
+@cache.cached(timeout=3600, query_string=True) # Decorator handles cache
 def get_recently_graded():
     limit = request.args.get('limit', 50, type=int)
     offset = request.args.get('offset', 0, type=int)
 
+    # Use Production SQL structure
     sql = """
         WITH RankedInspections AS (
-            SELECT
-                r.*, -- Select all from restaurants
-                ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn
+            SELECT r.*, ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn
             FROM restaurants r
-            WHERE r.grade IS NOT NULL AND r.grade NOT IN ('', 'N', 'Z', 'P') -- Select only A, B, C
+            WHERE r.grade IS NOT NULL AND r.grade NOT IN ('', 'N', 'Z', 'P')
             AND r.grade_date IS NOT NULL
         )
-        SELECT * FROM RankedInspections -- Includes google_rating etc. because of r.*
+        SELECT * FROM RankedInspections
         WHERE rn = 1
         ORDER BY grade_date DESC, inspection_date DESC
         LIMIT %s OFFSET %s;
     """
     params = (limit, offset)
+    # Call _execute_query WITHOUT use_cache argument
     results = _execute_query(sql, params)
 
-    # Production shaping seems different, let's use a simpler version
-    # matching the original preview logic but keeping enriched fields if needed
-    shaped_results = []
-    if results:
-        for row in results:
-            shaped_results.append({
-                'camis': row['camis'],
-                'dba': row['dba'],
-                'boro': row['boro'],
-                'building': row['building'],
-                'street': row['street'],
-                'zipcode': row['zipcode'],
-                'grade': row['grade'],
-                'grade_date': row['grade_date'],
-                'inspection_date': row['inspection_date'],
-                'cuisine_description': row['cuisine_description'],
-                'latitude': row['latitude'],
-                'longitude': row['longitude'],
-                'google_rating': row['google_rating'] # Include rating
-                 # Add other enriched fields if needed for this view
-            })
-
+    # Use simple shaping like Production file
+    shaped_results = [dict(row) for row in results] if results else []
     return jsonify(shaped_results)
 
 
-# --- Keep /lists/recent-actions & /grade-updates endpoint (ensure SELECT includes google_rating) ---
-# Assuming production has both routes pointing to the same function
+# --- Keep /lists/recent-actions & /grade-updates endpoint (ensure decorator is present) ---
 @app.route('/lists/recent-actions', methods=['GET'])
 @app.route('/grade-updates', methods=['GET'])
-@cache.cached(timeout=3600, query_string=True) # Use decorator
+@cache.cached(timeout=3600, query_string=True) # Decorator handles cache
 def get_grade_updates():
     limit = request.args.get('limit', 50, type=int)
     offset = request.args.get('offset', 0, type=int)
@@ -379,91 +360,54 @@ def get_grade_updates():
     if update_type not in ['finalized', 'closed', 'reopened']:
          abort(400, description="Invalid update type.")
 
+    # Use Production SQL structure
     base_sql_with = """
         WITH LatestRestaurantInspection AS (
-            SELECT
-                r.*, -- Select all fields from restaurants
-                ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn
+            SELECT r.*, ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn
             FROM restaurants r
-        ),
-        LatestRestaurantState AS (
-            SELECT * FROM LatestRestaurantInspection WHERE rn = 1
-        )
+        ), LatestRestaurantState AS ( SELECT * FROM LatestRestaurantInspection WHERE rn = 1 )
     """
-    params = [limit, offset] # Start params list
+    params = [limit, offset]
 
+    # (Keep SQL logic for finalized, closed, reopened exactly like Production/Previous)
     if update_type == 'finalized':
-        sql = base_sql_with + """
-            SELECT
-                gu.restaurant_camis AS camis,
-                lr.*, -- Select all fields from latest state
-                gu.previous_grade, gu.new_grade, gu.update_date AS finalized_date
-            FROM grade_updates gu
-            JOIN LatestRestaurantState lr ON gu.restaurant_camis = lr.camis
-                AND gu.inspection_date = lr.inspection_date -- Match specific inspection
-            WHERE gu.update_type = 'finalized'
-            ORDER BY gu.update_date DESC
-            LIMIT %s OFFSET %s;
-        """
+        sql = base_sql_with + """ SELECT gu.restaurant_camis AS camis, lr.*, gu.previous_grade, gu.new_grade, gu.update_date AS finalized_date FROM grade_updates gu JOIN LatestRestaurantState lr ON gu.restaurant_camis = lr.camis WHERE gu.update_type = 'finalized' AND gu.inspection_date = lr.inspection_date ORDER BY gu.update_date DESC LIMIT %s OFFSET %s; """
     elif update_type == 'closed':
-         sql = base_sql_with + """
-             SELECT lr.* -- Select all fields from latest state
-             FROM LatestRestaurantState lr
-             WHERE lr.action = 'Establishment Closed by DOHMH.'
-             ORDER BY lr.inspection_date DESC
-             LIMIT %s OFFSET %s;
-         """
+        sql = base_sql_with + """ SELECT lr.* FROM LatestRestaurantState lr WHERE lr.action = 'Establishment Closed by DOHMH.' ORDER BY lr.inspection_date DESC LIMIT %s OFFSET %s; """
     else: # reopened
-        sql = base_sql_with + """
-             WITH PreviousInspections AS (
-                 SELECT
-                     r.camis, r.action, r.inspection_date,
-                     ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn
-                 FROM restaurants r
-             ),
-             SecondLatestState AS ( SELECT * FROM PreviousInspections WHERE rn = 2 )
-             SELECT lr.* -- Select all fields from latest state
-             FROM LatestRestaurantState lr
-             JOIN SecondLatestState sls ON lr.camis = sls.camis
-             WHERE lr.action != 'Establishment Closed by DOHMH.'
-             AND sls.action = 'Establishment Closed by DOHMH.'
-             ORDER BY lr.inspection_date DESC
-             LIMIT %s OFFSET %s;
-         """
+        sql = base_sql_with + """ WITH PreviousInspections AS ( SELECT r.camis, r.action, r.inspection_date, ROW_NUMBER() OVER(PARTITION BY r.camis ORDER BY r.inspection_date DESC) as rn FROM restaurants r ), SecondLatestState AS ( SELECT * FROM PreviousInspections WHERE rn = 2 ) SELECT lr.* FROM LatestRestaurantState lr JOIN SecondLatestState sls ON lr.camis = sls.camis WHERE lr.action != 'Establishment Closed by DOHMH.' AND sls.action = 'Establishment Closed by DOHMH.' ORDER BY lr.inspection_date DESC LIMIT %s OFFSET %s; """
 
+    # Call _execute_query WITHOUT use_cache argument
     results = _execute_query(sql, tuple(params))
 
-    # Shape results: Convert rows to simple dicts, add update_type for clarity
-    shaped_results = []
-    if results:
-         for row in results:
-             row_dict = dict(row) # Convert psycopg dict_row to standard dict
-             row_dict['update_type'] = update_type # Add the type requested
-             # Rename new_grade/previous_grade for consistency if needed by iOS
+    # Use simple shaping like Production file
+    shaped_results = [dict(row) for row in results] if results else []
+    if shaped_results:
+         for item in shaped_results:
+             item['update_type'] = update_type
              if update_type == 'finalized':
-                 row_dict['grade'] = row_dict.pop('new_grade', None)
-                 row_dict['grade_date'] = row_dict.pop('finalized_date', None) # Use finalized_date as grade_date
-             shaped_results.append(row_dict)
+                  item['grade'] = item.pop('new_grade', None)
+                  item['grade_date'] = item.pop('finalized_date', None)
 
     return jsonify(shaped_results)
 
 
-# --- Keep /clear-cache endpoint (Use Flask-Caching method) ---
+# --- Keep /clear-cache endpoint (Match Production) ---
 @app.route('/clear-cache', methods=['POST'])
 def clear_cache():
     provided_key = request.headers.get('X-Update-Secret')
     expected_key = APIConfig.UPDATE_SECRET_KEY
     if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
         logger.warning("Unauthorized cache clear attempt.")
-        abort(403, description="Unauthorized.")
+        return jsonify({"status": "error", "message": "Unauthorized."}), 403
 
     try:
-        cleared = cache.clear() # Use Flask-Caching's clear method
-        if cleared:
+        cleared = cache.clear() # Use Flask-Caching's clear method like Production
+        # Check return value like Production
+        if cleared is not False:
              logger.info("Cache cleared successfully via API endpoint.")
              return jsonify({"status": "success", "message": "Cache cleared."}), 200
         else:
-             # cache.clear() might return False if cache type doesn't support clear
              logger.warning("Cache clear command executed, but cache might not support clearing or was already empty.")
              return jsonify({"status": "success", "message": "Cache clear attempted."}), 200
     except Exception as e:
@@ -471,41 +415,33 @@ def clear_cache():
         abort(500, description="Failed to clear cache.")
 
 
-# --- Keep Error Handlers (HTTPException and General Exception) ---
+# --- Keep Error Handlers (Match Production) ---
 @app.errorhandler(HTTPException)
 def handle_http_exception(e):
-    # (Keep existing implementation)
+    # Match Production response structure
     response = e.get_response()
-    response.data = json.dumps({
-        "code": e.code, "name": e.name, "description": e.description,
-    })
+    response.data = json.dumps({"code": e.code, "name": e.name, "description": e.description})
     response.content_type = "application/json"
-    logging.error(f"{e.code} {e.name}: {e.description} for request {request.url}")
+    logger.error(f"{e.code} {e.name}: {e.description} for request {request.url}")
     return response
 
-@app.errorhandler(Exception)
+@app.errorhandler(Exception) # Catch generic Exception like Production
 def handle_general_exception(e):
-    # (Keep existing implementation)
-    logging.error("An unexpected server error occurred.", exc_info=True)
+    logger.error("An unexpected server error occurred.", exc_info=True)
     if SentryConfig.SENTRY_DSN: sentry_sdk.capture_exception(e)
-    response = jsonify({
-        "code": 500, "name": "Internal Server Error",
-        "description": "An unexpected error occurred on the server.",
-    })
+    # Match Production response structure
+    response = jsonify({"code": 500, "name": "Internal Server Error", "description": "An unexpected error occurred on the server."})
     response.status_code = 500
     return response
 
-# --- Keep Main block (DatabaseManager init, app.run) ---
+# --- Keep Main block (Match Production/Preview) ---
 if __name__ == '__main__':
-    # Initialize DB pool when running directly (Gunicorn might handle this differently)
     try:
          DatabaseManager.initialize_pool()
+         logger.info("Database pool initialized successfully.")
     except Exception as e:
          logger.critical(f"Failed to initialize database pool on startup: {e}", exc_info=True)
-         # Optionally exit if DB pool is critical for startup
-         # exit(1)
+         exit(1) # Exit if DB is required
 
     logger.info(f"Starting Flask app on {APIConfig.HOST}:{APIConfig.PORT} with DEBUG={APIConfig.DEBUG}")
-    # Use waitress or another production server instead of app.run in production
-    # For development:
     app.run(host=APIConfig.HOST, port=APIConfig.PORT, debug=APIConfig.DEBUG)
