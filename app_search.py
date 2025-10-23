@@ -147,73 +147,136 @@ def _group_and_shape_results(rows):
 
 # --- API Routes ---
 
+# In PREVIEW_app_search.py
+
+# --- (Keep imports, app setup, cache setup, CustomJSONEncoder, _execute_query, _group_and_shape_results AS IS) ---
+# Ensure _group_and_shape_results in PREVIEW is identical to PRODUCTION
+
 @app.route('/search', methods=['GET'])
+@cache.cached(timeout=300, query_string=True) # Use cache decorator like production
 def search_restaurants():
-    query = request.args.get('q', '').strip() # Changed 'name' back to 'q' if that's what your iOS uses
-    limit = request.args.get('limit', 20, type=int) # Changed 'per_page' back to 'limit'
-    page = request.args.get('page', 1, type=int) # Added page handling
+    # --- Use parameters and logic exactly like PRODUCTION ---
+    query = request.args.get('name', '').strip()
+    limit = request.args.get('per_page', 25, type=int)
+    page = request.args.get('page', 1, type=int)
     offset = (page - 1) * limit
+    grade = request.args.get('grade')
+    boro = request.args.get('boro')
+    cuisine = request.args.get('cuisine')
+    sort_param = request.args.get('sort', 'relevance') # Default to relevance like production
 
-    if not query:
-        logger.info("Search request with no query, returning empty.")
-        return jsonify([]) # Return empty list if no query
+    if not query and not grade and not boro and not cuisine:
+        logger.info("Search request with no query or filters, returning empty.")
+        return jsonify([])
 
-    normalized_query = normalize_search_term_for_hybrid(query)
-    # Use cache key including query, limit, and offset
-    cache_key = f"search:{normalized_query}:limit:{limit}:offset:{offset}" # Corrected key formatting
+    normalized_query = normalize_search_term_for_hybrid(query) if query else None
 
-    # --- Use the existing SQL query from your file ---
-    sql = """
-        SELECT DISTINCT ON (r.camis)
-            r.camis, r.dba, r.boro, r.building, r.street, r.zipcode, r.phone,
-            r.cuisine_description, r.inspection_date, r.action, r.critical_flag,
-            r.grade, r.grade_date, r.inspection_type, r.latitude, r.longitude,
-            -- Include rating for search results
-            r.google_rating
-        FROM restaurants r
-        WHERE r.dba_normalized_search LIKE %s OR r.dba ILIKE %s
-        ORDER BY r.camis, r.inspection_date DESC
-        LIMIT %s OFFSET %s;
+    # --- Build WHERE clause exactly like PRODUCTION ---
+    where_clauses = ["TRUE"]
+    params_list = []
+
+    if normalized_query:
+        where_clauses.append("(similarity(r.dba_normalized_search, %s) > 0.2 OR r.dba ILIKE %s)")
+        params_list.extend([normalized_query, f"%{query}%"])
+    elif query:
+        where_clauses.append("r.dba ILIKE %s")
+        params_list.append(f"%{query}%")
+
+    if grade and grade.upper() in ['A', 'B', 'C', 'P', 'Z', 'N']:
+         if grade.upper() in ['P', 'Z', 'N']:
+             where_clauses.append("r.grade IN ('P', 'Z', 'N')")
+         else:
+             where_clauses.append("r.grade = %s")
+             params_list.append(grade.upper())
+    if boro and boro != 'Any':
+        where_clauses.append("r.boro = %s")
+        params_list.append(boro.title())
+    if cuisine and cuisine != 'Any':
+        where_clauses.append("r.cuisine_description = %s")
+        params_list.append(cuisine)
+
+    where_sql = " AND ".join(where_clauses)
+
+    # --- Build ORDER BY exactly like PRODUCTION ---
+    order_by_sql_parts = []
+    # Store original params list length before potentially adding similarity param for sorting
+    base_params_count = len(params_list)
+
+    if normalized_query and sort_param == 'relevance':
+        params_list.insert(0, normalized_query) # Add similarity param for ORDER BY
+        order_by_sql_parts.append("similarity(r.dba_normalized_search, %s) DESC")
+
+    sort_field = "r.inspection_date"
+    sort_direction = "DESC"
+    if sort_param == 'date_asc':
+        sort_direction = "ASC"
+    elif sort_param == 'name_asc':
+        sort_field = "r.dba"
+        sort_direction = "ASC"
+    elif sort_param == 'name_desc':
+        sort_field = "r.dba"
+        sort_direction = "DESC"
+
+    order_by_sql_parts.append(f"{sort_field} {sort_direction}")
+    order_by_sql_parts.append("r.camis") # Add camis for stable pagination sort
+    order_by_sql = ", ".join(order_by_sql_parts)
+
+    # --- Use the exact SQL query structure from PRODUCTION ---
+    # This fetches all necessary rows for grouping later
+    sql = f"""
+        SELECT r.*, v.violation_code, v.violation_description
+        FROM (
+            SELECT DISTINCT r_inner.camis
+            FROM restaurants r_inner
+            WHERE {where_sql} -- Apply filters to find relevant CAMIS
+            ORDER BY {order_by_sql} -- Apply sort to determine which CAMIS are on this page
+            LIMIT %s OFFSET %s
+        ) AS paged_restaurants
+        JOIN restaurants r ON paged_restaurants.camis = r.camis
+        LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
+        WHERE {where_sql} -- Apply filters AGAIN to get all inspections/violations for the paged CAMIS
+        ORDER BY {order_by_sql}, r.inspection_date DESC; -- Final sort for grouping logic
     """
-    # Use parameters exactly as in your original file
-    params = (f"%{normalized_query}%", f"%{query}%", limit, offset)
 
-    # Use cache for search results (as in your original _execute_query)
-    results = _execute_query(sql, params, use_cache=True, cache_key=cache_key, cache_ttl=3600)
+    # --- Construct parameters exactly like PRODUCTION ---
+    # Params for outer WHERE clause + sorting + LIMIT + OFFSET + inner WHERE clause
+    # Need to duplicate the WHERE clause params
+    final_params_list = params_list # Contains similarity param if needed for ORDER BY
+    # Add WHERE params again (excluding potential similarity sort param)
+    final_params_list += params_list[len(params_list)-base_params_count:]
+    final_params_list += [limit, offset] # Add LIMIT and OFFSET
 
-    # Check if results is None before iterating
-    if results is None:
-        logger.warning(f"Search query returned None for query: {query}")
-        return jsonify([]) # Return empty if DB error occurred
+    params_tuple = tuple(final_params_list)
 
-    shaped_results = []
-    for row in results:
-        shaped_results.append({
-            # Map keys exactly as expected by Models.swift based on your original file
-            'camis': row['camis'],
-            'dba': row['dba'],
-            'boro': row['boro'],
-            'building': row['building'],
-            'street': row['street'],
-            'zipcode': row['zipcode'],
-            'phone': row['phone'],
-            'cuisine_description': row['cuisine_description'], # Keep snake_case
-            # Send the latest inspection details directly
-            'inspection_date': row['inspection_date'], # Keep snake_case
-            'action': row['action'],
-            'critical_flag': row['critical_flag'], # Keep snake_case
-            'grade': row['grade'],
-            'grade_date': row['grade_date'], # Keep snake_case
-            'inspection_type': row['inspection_type'], # Keep snake_case
-            'latitude': row['latitude'],
-            'longitude': row['longitude'],
-            'google_rating': row['google_rating'] # Keep snake_case
-            # Note: We are NOT sending the 'inspections' array here
-            # Note: We are NOT sending other enriched fields like hours/website for search results
-        })
-        
-    logger.info(f"Search for '{query}' returned {len(shaped_results)} results.")
-    return jsonify(shaped_results)
+    # --- Execute query ---
+    try:
+        # Pass use_cache=False because decorator handles it
+        all_rows = _execute_query(sql, params_tuple, use_cache=False)
+    except Exception as e:
+         logger.error(f"Search query failed: {e}", exc_info=True)
+         # Match production error response more closely if needed
+         return jsonify({"error": "Search failed", "details": str(e)}), 500
+
+    # --- Determine ordered CAMIS list for grouping (like PRODUCTION) ---
+    ordered_camis = []
+    seen_camis = set()
+    if all_rows: # Check if all_rows is not None
+        # This relies on the final ORDER BY clause in the SQL
+        for row in all_rows:
+            camis_str = str(row['camis']) # Convert to string for consistency
+            if camis_str not in seen_camis:
+                ordered_camis.append(camis_str)
+                seen_camis.add(camis_str)
+                if len(ordered_camis) == limit: # Stop once we have enough unique CAMIS for the page
+                     break
+    else:
+        all_rows = [] # Ensure all_rows is an empty list if None
+
+    # Ensure _group_and_shape_results includes google_rating in its logic
+    grouped_data = _group_and_shape_results(all_rows, ordered_camis)
+
+    logger.info(f"Search for '{query}' found {len(ordered_camis)} unique restaurants, returning grouped data.")
+    return jsonify(grouped_data) # Return the grouped structure from production logic
 
 @app.route('/restaurant/<string:camis>', methods=['GET'])
 def get_restaurant_details(camis):
