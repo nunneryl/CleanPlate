@@ -1,26 +1,26 @@
-# In file: PREVIEW_app_search.py (Corrected for SyntaxError and Param Mismatch)
+# In file: PREVIEW_app_search.py (Corrected with GROUP BY)
 
 import logging
 from datetime import datetime, date
 import json
-import redis # Keep Redis import
-from decimal import Decimal # Keep Decimal import for JSON encoding
+import redis
+from decimal import Decimal
 from flask import Flask, jsonify, request, abort, Response
-from flask_cors import CORS # Import CORS from Production
-from flask_caching import Cache # Import Cache from Production
-import psycopg # Keep psycopg import
+from flask_cors import CORS
+from flask_caching import Cache
+import psycopg
 from psycopg.rows import dict_row
-from db_manager import DatabaseConnection, DatabaseManager # Keep db_manager import
-from config import RedisConfig, APIConfig, SentryConfig # Keep config import
-from utils import normalize_search_term_for_hybrid # Keep utils import
+from db_manager import DatabaseConnection, DatabaseManager
+from config import RedisConfig, APIConfig, SentryConfig
+from utils import normalize_search_term_for_hybrid
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
 from werkzeug.exceptions import HTTPException
-import os # Import os like Production
-import secrets # Import secrets like Production
-import threading # Import threading like Production
+import os
+import secrets
+import threading
 
-# --- Sentry Initialization (Keep as is from Preview file) ---
+# --- Sentry Initialization ---
 if SentryConfig.SENTRY_DSN:
     sentry_sdk.init(
         dsn=SentryConfig.SENTRY_DSN, integrations=[FlaskIntegration()],
@@ -30,25 +30,25 @@ if SentryConfig.SENTRY_DSN:
 else:
     logging.info("Sentry DSN not found, skipping initialization.")
 
-# --- Logging Setup (Match Production) ---
+# --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 logger = logging.getLogger(__name__)
 
-# --- Flask App Initialization (Match Production) ---
+# --- Flask App Initialization ---
 app = Flask(__name__)
-CORS(app) # Enable CORS like production
+CORS(app)
 
-# --- CORRECTED CACHE CONFIGURATION (Match Production) ---
+# --- Cache Configuration ---
 cache_config = {
     "CACHE_TYPE": "RedisCache",
-    "CACHE_REDIS_URL": os.environ.get('REDIS_URL'), # Get URL from environment like Production
-    "CACHE_DEFAULT_TIMEOUT": 300 # Default timeout like Production
+    "CACHE_REDIS_URL": os.environ.get('REDIS_URL'),
+    "CACHE_DEFAULT_TIMEOUT": 300
 }
 app.config.from_mapping(cache_config)
-cache = Cache(app) # Initialize Cache AFTER app config is set (like Production)
+cache = Cache(app)
 # --- END CACHE CORRECTION ---
 
-# --- Custom JSON Encoder (Keep as is from Preview file) ---
+# --- Custom JSON Encoder ---
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, date): return obj.isoformat()
@@ -58,44 +58,36 @@ app.json_encoder = CustomJSONEncoder
 
 # --- Helper Functions ---
 
-# _execute_query: (Keep as is from your provided file, mogrify removed)
 def _execute_query(sql, params=None, fetch_one=False):
     """Executes a SQL query."""
     try:
         with DatabaseConnection() as conn, conn.cursor(row_factory=dict_row) as cursor:
-            # Production uses try-except around execute
             try:
-                # REMOVED: logger.debug(f"Executing SQL: {cursor.mogrify(sql, params).decode('utf-8') if params else sql}")
-                logger.debug(f"Executing SQL query...") # Simplified log
+                logger.debug(f"Executing SQL query...")
                 cursor.execute(sql, params)
                 if fetch_one: result = cursor.fetchone()
                 else: result = cursor.fetchall()
                 logger.debug(f"Query returned {len(result) if isinstance(result, list) else (1 if result else 0)} rows.")
                 return result
-            except psycopg.Error as db_err: # Catch specific DB errors like Production
-                # Log the specific error and query details (without mogrify)
+            except psycopg.Error as db_err:
                 logger.error(f"Database query error during execution: {db_err} SQL: {sql} PARAMS: {params}", exc_info=True)
                 abort(500, description="Database query error occurred during execution.")
-            except Exception as e: # Catch other potential errors during execution
+            except Exception as e:
                 logger.error(f"General error during query execution: {e} SQL: {sql} PARAMS: {params}", exc_info=True)
                 abort(500, description="General error during query execution.")
-    except psycopg.Error as conn_err: # Catch connection errors like Production
+    except psycopg.Error as conn_err:
         logger.error(f"Database connection error: {conn_err}", exc_info=True)
         abort(500, description="Database connection error occurred.")
-    except Exception as e: # Catch other potential errors getting connection/cursor
+    except Exception as e:
         logger.error(f"Error getting DB connection or cursor: {e}", exc_info=True)
         abort(500, description="Error establishing database connection.")
 
 
-# _group_and_shape_results: *** FIX 1 (SyntaxError) APPLIED HERE ***
 def _group_and_shape_results(all_rows, ordered_camis):
     """Groups violations under their respective restaurant inspection."""
     if not all_rows: return []
     
-    # --- FIX 1: Corrected dictionary comprehension ---
     restaurant_rows_map = {camis_str: [] for camis_str in ordered_camis}
-    # --- END FIX 1 ---
-
     for row in all_rows:
         camis_str = str(row['camis'])
         if camis_str in restaurant_rows_map:
@@ -157,11 +149,9 @@ def _group_and_shape_results(all_rows, ordered_camis):
 
 # --- API Routes ---
 
-# CORRECTED search_restaurants (Matches PRODUCTION logic, uses decorator)
 @app.route('/search', methods=['GET'])
-@cache.cached(timeout=300, query_string=True) # Cache decorator applied HERE
+@cache.cached(timeout=300, query_string=True)
 def search_restaurants():
-    # --- Use parameters and logic exactly like PRODUCTION ---
     query = request.args.get('name', '').strip()
     limit = request.args.get('per_page', 25, type=int)
     page = request.args.get('page', 1, type=int)
@@ -169,42 +159,76 @@ def search_restaurants():
     grade = request.args.get('grade')
     boro = request.args.get('boro')
     cuisine = request.args.get('cuisine')
-    sort_param = request.args.get('sort', 'relevance') # Default like Production
+    sort_param = request.args.get('sort', 'relevance')
 
-    # --- (Keep WHERE and ORDER BY logic exactly like Production/Previous Correct Version) ---
     if not query and not grade and not boro and not cuisine:
         logger.info("Search request with no query or filters, returning empty.")
         return jsonify([])
+    
     normalized_query = normalize_search_term_for_hybrid(query) if query else None
+    
+    # --- Build WHERE, GROUP BY, and ORDER BY clauses ---
     where_clauses = ["TRUE"]; params_list = []
+    
     if normalized_query:
         where_clauses.append("(similarity(r_inner.dba_normalized_search, %s) > 0.2 OR r_inner.dba ILIKE %s)"); params_list.extend([normalized_query, f"%{query}%"])
     elif query:
         where_clauses.append("r_inner.dba ILIKE %s"); params_list.append(f"%{query}%")
+    
     if grade and grade.upper() in ['A', 'B', 'C', 'P', 'Z', 'N']:
         where_clauses.append("r_inner.grade = %s" if grade.upper() in ['A','B','C'] else "r_inner.grade IN ('P', 'Z', 'N')")
         if grade.upper() in ['A','B','C']: params_list.append(grade.upper())
     if boro and boro != 'Any': where_clauses.append("r_inner.boro = %s"); params_list.append(boro.title())
     if cuisine and cuisine != 'Any': where_clauses.append("r_inner.cuisine_description = %s"); params_list.append(cuisine)
+    
     where_sql_for_subquery = " AND ".join(where_clauses)
+    
     order_by_sql_parts = []; sort_params_list = []
+    # Start GROUP BY with camis. We'll add dba if needed for sorting.
+    group_by_sql_parts = ["r_inner.camis"]
+    
     if normalized_query and sort_param == 'relevance':
-        sort_params_list.append(normalized_query); order_by_sql_parts.append("similarity(r_inner.dba_normalized_search, %s) DESC")
+        # Use MAX(similarity) to get the best match for that camis
+        relevance_agg = "MAX(similarity(r_inner.dba_normalized_search, %s))"
+        order_by_sql_parts.append(f"{relevance_agg} DESC")
+        sort_params_list.append(normalized_query)
+    
     sort_field = "r_inner.inspection_date"; sort_direction = "DESC"
-    if sort_param == 'date_asc': sort_direction = "ASC"
-    elif sort_param == 'name_asc': sort_field = "r_inner.dba"; sort_direction = "ASC"
-    elif sort_param == 'name_desc': sort_field = "r_inner.dba"; sort_direction = "DESC"
-    order_by_sql_parts.append(f"{sort_field} {sort_direction}"); order_by_sql_parts.append("r_inner.camis")
-    order_by_sql_for_subquery = ", ".join(order_by_sql_parts)
-    # --- (End WHERE and ORDER BY logic) ---
+    agg_func = "MAX" # Get the most recent inspection date
+    
+    if sort_param == 'date_asc':
+        sort_direction = "ASC"; agg_func = "MIN" # Get the oldest
+    elif sort_param == 'name_asc':
+        sort_field = "r_inner.dba"; sort_direction = "ASC"; agg_func = "" # No agg needed, will be in GROUP BY
+    elif sort_param == 'name_desc':
+        sort_field = "r_inner.dba"; sort_direction = "DESC"; agg_func = "" # No agg needed
 
-    # --- Use the exact SQL query structure from PRODUCTION ---
+    # Add dba to GROUP BY if we are sorting by it
+    if "dba" in sort_field and "r_inner.dba" not in group_by_sql_parts:
+        group_by_sql_parts.append("r_inner.dba")
+
+    if agg_func:
+        order_by_sql_parts.append(f"{agg_func}({sort_field}) {sort_direction}")
+    else:
+        # Sort field is already in the GROUP BY clause
+        order_by_sql_parts.append(f"{sort_field} {sort_direction}")
+
+    order_by_sql_parts.append("r_inner.camis") # Final tie-breaker
+    
+    order_by_sql_for_subquery = ", ".join(order_by_sql_parts)
+    group_by_sql_for_subquery = ", ".join(group_by_sql_parts)
+    # --- End clause building ---
+
+    # --- Construct the SQL query using GROUP BY ---
     sql = f"""
         SELECT r.*, v.violation_code, v.violation_description
         FROM (
-            SELECT DISTINCT r_inner.camis
+            SELECT r_inner.camis
             FROM restaurants r_inner
-            WHERE {where_sql_for_subquery} ORDER BY {order_by_sql_for_subquery} LIMIT %s OFFSET %s
+            WHERE {where_sql_for_subquery}
+            GROUP BY {group_by_sql_for_subquery}
+            ORDER BY {order_by_sql_for_subquery}
+            LIMIT %s OFFSET %s
         ) AS paged_restaurants
         JOIN restaurants r ON paged_restaurants.camis = r.camis
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date
@@ -212,7 +236,7 @@ def search_restaurants():
         ORDER BY {order_by_sql_for_subquery.replace('r_inner.', 'r.')}, r.inspection_date DESC;
     """
 
-    # --- *** FIX 2 (Parameter Mismatch) APPLIED HERE *** ---
+    # --- Build the final parameter tuple (this was correct in your last version) ---
     final_params_list = []
     final_params_list.extend(params_list)      # For subquery WHERE
     final_params_list.extend(sort_params_list) # For subquery ORDER BY
@@ -221,7 +245,7 @@ def search_restaurants():
     final_params_list.extend(params_list)      # For outer query WHERE
     final_params_list.extend(sort_params_list) # For outer query ORDER BY
     params_tuple = tuple(final_params_list)
-    # --- END FIX 2 ---
+    # --- End parameter building ---
 
     logger.debug(f"Attempting search with {len(params_tuple)} parameters.")
 
@@ -229,6 +253,7 @@ def search_restaurants():
         all_rows = _execute_query(sql, params_tuple) # No use_cache needed
     except Exception as e:
         logger.error(f"Search query failed.", exc_info=True)
+        # We must return a valid response, not raise another error
         return jsonify({"error": "Search failed"}), 500
 
     # --- Determine ordered CAMIS list for grouping (like PRODUCTION) ---
@@ -239,7 +264,23 @@ def search_restaurants():
             if camis_str not in seen_camis:
                 ordered_camis.append(camis_str)
                 seen_camis.add(camis_str)
-                if len(ordered_camis) >= limit: break
+                # The LIMIT is now correctly applied in the SQL subquery
+                # But we still need this to preserve the order for grouping
+        
+        # This logic is flawed if LIMIT is hit mid-restaurant
+        # Let's get the camis list from the subquery result directly
+        
+        # New logic to get ordered_camis
+        camis_set_in_order = set()
+        ordered_camis_list = []
+        for row in all_rows:
+            camis_str = str(row['camis'])
+            if camis_str not in camis_set_in_order:
+                camis_set_in_order.add(camis_str)
+                ordered_camis_list.append(camis_str)
+        
+        ordered_camis = ordered_camis_list # Use this ordered list
+
     else: all_rows = []
 
     # --- Use the production _group_and_shape_results ---
@@ -326,4 +367,5 @@ if __name__ == '__main__':
     try: DatabaseManager.initialize_pool(); logger.info("Database pool initialized successfully.")
     except Exception as e: logger.critical(f"Failed to initialize database pool on startup: {e}", exc_info=True); exit(1)
     logger.info(f"Starting Flask app on {APIConfig.HOST}:{APIConfig.PORT} with DEBUG={APIConfig.DEBUG}")
-    app.run(host=APIConfig.HOST, port=APIConfig.PORT, debug=APIConfig.DEBUG)
+    app.run(host=APIConfig.HOST, port=APIWebConfig.PORT, debug=APIConfig.DEBUG)
+
