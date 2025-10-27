@@ -70,6 +70,21 @@ class CustomJSONEncoder(json.JSONEncoder):
         return super().default(obj)
 app.json_encoder = CustomJSONEncoder
 
+# --- APPLE KEY CACHING ---
+@cache.cached(timeout=86400) # Cache for 24 hours
+def get_apple_public_keys():
+    """
+    Fetches Apple's public keys for Sign in with Apple token verification.
+    """
+    try:
+        r = requests.get("https://appleid.apple.com/auth/keys")
+        r.raise_for_status()
+        keys_data = r.json()
+        # Create a dictionary mapping the key ID (kid) to the key data
+        return {key['kid']: key for key in keys_data['keys']}
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to fetch Apple public keys: {e}")
+        return None
 # --- Helper Functions ---
 
 def _execute_query(sql, params=None, fetch_one=False):
@@ -165,12 +180,62 @@ def _group_and_shape_results(all_rows, ordered_camis):
 # --- SECURITY & AUTH HELPERS (From Production) ---
 
 def verify_apple_token(token):
+    """
+    Securely verifies an Apple ID token's signature and payload.
+    """
+    # CRITICAL: You must set this environment variable in Railway.
+    # e.g., "com.yourcompany.cleanplate"
+    APPLE_APP_BUNDLE_ID = os.environ.get('APPLE_APP_BUNDLE_ID')
+    if not APPLE_APP_BUNDLE_ID:
+        logger.critical("APPLE_APP_BUNDLE_ID environment variable is not set. Cannot verify tokens.")
+        return None
+
     try:
-        logger.warning("SECURITY ALERT: Token signature verification is NOT IMPLEMENTED. This is insecure.")
-        unverified_payload = jwt.decode(token, options={"verify_signature": False})
-        return unverified_payload.get('sub')
-    except jwt.PyJWTError as e:
-        logger.error(f"Token verification failed: {e}")
+        # Get the key ID (kid) from the token's header
+        unverified_header = jwt.get_unverified_header(token)
+        kid = unverified_header.get('kid')
+        if not kid:
+            logger.warning("Token missing 'kid' in header.")
+            return None
+
+        # Get Apple's public keys (from cache or live)
+        apple_keys = get_apple_public_keys()
+        if not apple_keys:
+            logger.error("Could not retrieve Apple public keys.")
+            return None
+
+        # Find the matching key
+        key_data = apple_keys.get(kid)
+        if not key_data:
+            logger.warning(f"Token 'kid' {kid} not found in Apple's public keys.")
+            return None
+
+        # Construct the public key from the JWK data (n, e)
+        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
+
+        # Decode and verify the token's signature, audience, and issuer
+        decoded_payload = jwt.decode(
+            token,
+            key=public_key,
+            algorithms=['RS256'],
+            audience=APPLE_APP_BUNDLE_ID,
+            issuer='https://appleid.apple.com'
+        )
+        
+        # Token is valid, return the full payload
+        return decoded_payload
+
+    except jwt.ExpiredSignatureError:
+        logger.warning("Apple token has expired.")
+        return None
+    except jwt.InvalidAudienceError:
+        logger.warning("Apple token has invalid audience.")
+        return None
+    except jwt.InvalidIssuerError:
+        logger.warning("Apple token has invalid issuer.")
+        return None
+    except Exception as e:
+        logger.error(f"General error verifying Apple token: {e}", exc_info=True)
         return None
 
 def _get_user_id_from_token(request):
@@ -179,10 +244,15 @@ def _get_user_id_from_token(request):
         return None, jsonify({"error": "Authorization token is required"}), 401
     
     token = auth_header.split(' ')[1]
-    user_id = verify_apple_token(token)
+    payload = verify_apple_token(token)
     
-    if not user_id:
+    if not payload:
         return None, jsonify({"error": "Invalid or expired token"}), 401
+    
+    user_id = payload.get('sub') # 'sub' (subject) is the user's unique ID
+    if not user_id:
+        logger.error("Token payload verified but missing 'sub' (user_id).")
+        return None, jsonify({"error": "Invalid token payload"}), 401
         
     return user_id, None, None
 
@@ -382,9 +452,14 @@ def create_user():
     token = data.get('identityToken')
     if not token: return jsonify({"error": "identityToken is required"}), 400
 
-    user_id = verify_apple_token(token)
-    if not user_id:
+    payload = verify_apple_token(token)
+    if not payload:
         return jsonify({"error": "Invalid token"}), 400
+
+    user_id = payload.get('sub')
+    if not user_id:
+         logger.error("Token payload verified but missing 'sub' (user_id) during user creation.")
+         return jsonify({"error": "Invalid token payload"}), 400
 
     insert_query = "INSERT INTO users (id) VALUES (%s) ON CONFLICT (id) DO NOTHING;"
     try:
@@ -494,7 +569,7 @@ def save_recent_search():
         return jsonify({"error": "search_term is required and cannot be empty"}), 400
     
     search_term_display = search_term.strip()
-    search_term_normalized = search_term_display.lower()
+    search_term_normalized = normalize_search_term_for_hybrid(search_term_display)
 
     upsert_query = """
         INSERT INTO recent_searches (user_id, search_term_display, search_term_normalized)
