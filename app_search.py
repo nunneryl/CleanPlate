@@ -211,7 +211,7 @@ def verify_apple_token(token):
             return None, "TOKEN_KID_ERROR"
 
         # Construct the public key from the JWK data (n, e)
-        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
+        public_key = jwt.PyJWK(key_data).key
         
         valid_audiences = [APPLE_APP_BUNDLE_ID, APPLE_SERVICES_ID]
         
