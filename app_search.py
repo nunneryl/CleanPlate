@@ -186,7 +186,8 @@ def verify_apple_token(token):
     # CRITICAL: You must set this environment variable in Railway.
     # e.g., "com.yourcompany.cleanplate"
     APPLE_APP_BUNDLE_ID = os.environ.get('APPLE_APP_BUNDLE_ID')
-    if not APPLE_APP_BUNDLE_ID:
+    APPLE_SERVICES_ID = os.environ.get('APPLE_SERVICES_ID') # <-- NEW
+    if not APPLE_APP_BUNDLE_ID or not APPLE_SERVICES_ID: # <-- UPDATED
         logger.critical("APPLE_APP_BUNDLE_ID environment variable is not set. Cannot verify tokens.")
         return None
 
@@ -212,13 +213,15 @@ def verify_apple_token(token):
 
         # Construct the public key from the JWK data (n, e)
         public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
+        
+        valid_audiences = [APPLE_APP_BUNDLE_ID, APPLE_SERVICES_ID] # <-- NEW
 
         # Decode and verify the token's signature, audience, and issuer
         decoded_payload = jwt.decode(
             token,
             key=public_key,
             algorithms=['RS256'],
-            audience=APPLE_APP_BUNDLE_ID,
+            audience=valid_audiences, # <-- UPDATED
             issuer='https://appleid.apple.com'
         )
         
