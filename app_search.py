@@ -177,69 +177,76 @@ def _group_and_shape_results(all_rows, ordered_camis):
         final_results.append(restaurant_obj)
     return final_results
 
-# --- SECURITY & AUTH HELPERS (From Production) ---
-
 def verify_apple_token(token):
     """
     Securely verifies an Apple ID token's signature and payload.
+    (This version has enhanced logging for debugging)
     """
-    # CRITICAL: You must set this environment variable in Railway.
-    # e.g., "com.yourcompany.cleanplate"
     APPLE_APP_BUNDLE_ID = os.environ.get('APPLE_APP_BUNDLE_ID')
-    APPLE_SERVICES_ID = os.environ.get('APPLE_SERVICES_ID') # <-- NEW
-    if not APPLE_APP_BUNDLE_ID or not APPLE_SERVICES_ID: # <-- UPDATED
-        logger.critical("APPLE_APP_BUNDLE_ID environment variable is not set. Cannot verify tokens.")
-        return None
+    APPLE_SERVICES_ID = os.environ.get('APPLE_SERVICES_ID')
+    
+    if not APPLE_APP_BUNDLE_ID or not APPLE_SERVICES_ID:
+        logger.critical("CRITICAL_AUTH_ERROR: APPLE_APP_BUNDLE_ID or APPLE_SERVICES_ID environment variable is not set.")
+        return None, "CONFIG_ERROR"
 
     try:
         # Get the key ID (kid) from the token's header
         unverified_header = jwt.get_unverified_header(token)
         kid = unverified_header.get('kid')
         if not kid:
-            logger.warning("Token missing 'kid' in header.")
-            return None
+            logger.warning("AUTH_FAILURE: Token missing 'kid' in header.")
+            return None, "TOKEN_HEADER_ERROR"
 
         # Get Apple's public keys (from cache or live)
+        # Assumes get_apple_public_keys() function exists in your file
         apple_keys = get_apple_public_keys()
         if not apple_keys:
-            logger.error("Could not retrieve Apple public keys.")
-            return None
+            logger.error("AUTH_FAILURE: Could not retrieve Apple public keys.")
+            return None, "APPLE_KEY_FETCH_ERROR"
 
         # Find the matching key
         key_data = apple_keys.get(kid)
         if not key_data:
-            logger.warning(f"Token 'kid' {kid} not found in Apple's public keys.")
-            return None
+            logger.warning(f"AUTH_FAILURE: Token 'kid' {kid} not found in Apple's public keys.")
+            return None, "TOKEN_KID_ERROR"
 
         # Construct the public key from the JWK data (n, e)
         public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
         
-        valid_audiences = [APPLE_APP_BUNDLE_ID, APPLE_SERVICES_ID] # <-- NEW
-
-        # Decode and verify the token's signature, audience, and issuer
+        valid_audiences = [APPLE_APP_BUNDLE_ID, APPLE_SERVICES_ID]
+        
+        # --- Decode and verify ---
         decoded_payload = jwt.decode(
             token,
             key=public_key,
             algorithms=['RS256'],
-            audience=valid_audiences, # <-- UPDATED
+            audience=valid_audiences,
             issuer='https://appleid.apple.com'
         )
         
-        # Token is valid, return the full payload
-        return decoded_payload
+        # SUCCESS!
+        return decoded_payload, "SUCCESS"
 
     except jwt.ExpiredSignatureError:
-        logger.warning("Apple token has expired.")
-        return None
+        logger.warning("AUTH_FAILURE: Apple token has expired.")
+        return None, "TOKEN_EXPIRED"
     except jwt.InvalidAudienceError:
-        logger.warning("Apple token has invalid audience.")
-        return None
+        # --- THIS IS THE MOST LIKELY ERROR ---
+        try:
+            # Decode without verifying to inspect the payload
+            unverified_payload = jwt.decode(token, options={"verify_signature": False})
+            token_audience = unverified_payload.get('aud')
+            logger.warning(f"AUTH_FAILURE: Invalid Audience. Token 'aud' field was: '{token_audience}'.")
+            logger.warning(f"AUTH_FAILURE: We expected one of: '{valid_audiences}'.")
+        except Exception as e:
+            logger.warning(f"AUTH_FAILURE: Invalid Audience, and could not decode payload to log it. Error: {e}")
+        return None, "TOKEN_AUDIENCE_ERROR"
     except jwt.InvalidIssuerError:
-        logger.warning("Apple token has invalid issuer.")
-        return None
+        logger.warning("AUTH_FAILURE: Apple token has invalid issuer.")
+        return None, "TOKEN_ISSUER_ERROR"
     except Exception as e:
-        logger.error(f"General error verifying Apple token: {e}", exc_info=True)
-        return None
+        logger.error(f"AUTH_FAILURE: General error verifying Apple token: {e}", exc_info=True)
+        return None, "GENERAL_VERIFY_ERROR"
 
 def _get_user_id_from_token(request):
     auth_header = request.headers.get('Authorization')
@@ -450,26 +457,30 @@ def get_grade_updates():
 
 @app.route('/users', methods=['POST'])
 def create_user():
-    if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+    
     data = request.get_json()
     token = data.get('identityToken')
-    if not token: return jsonify({"error": "identityToken is required"}), 400
+    
+    if not token:
+        return jsonify({"error": "identityToken is required"}), 400
 
-    payload = verify_apple_token(token)
+    # Updated call to get payload and error status
+    payload, status = verify_apple_token(token)
+    
     if not payload:
-        return jsonify({"error": "Invalid token"}), 400
-
+        # Return a more specific error based on the failure
+        return jsonify({"error": "Invalid token", "status_code": status}), 400
+    
     user_id = payload.get('sub')
     if not user_id:
-         logger.error("Token payload verified but missing 'sub' (user_id) during user creation.")
-         return jsonify({"error": "Invalid token payload"}), 400
+         logger.error("AUTH_FAILURE: Token payload verified but missing 'sub' (user_id) during user creation.")
+         return jsonify({"error": "Invalid token payload", "status_code": "TOKEN_PAYLOAD_ERROR"}), 400
 
     insert_query = "INSERT INTO users (id) VALUES (%s) ON CONFLICT (id) DO NOTHING;"
     try:
-        _execute_query(insert_query, (user_id,))
-        # Note: _execute_query doesn't conn.commit() automatically. This might need adjustment
-        # For simple inserts like this, we'll open a connection to commit.
-        with DatabaseConnection() as conn:
+        with DatabaseConnection() as conn: # Assumes DatabaseConnection is in your file
             with conn.cursor() as cursor:
                 cursor.execute(insert_query, (user_id,))
             conn.commit()
