@@ -12,3 +12,4 @@ sentry-sdk[flask]>=1.40.0
 redis>=4.0.0
 PyJWT==2.8.0
 Flask-Caching==2.1.0
+cryptography
