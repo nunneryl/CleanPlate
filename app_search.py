@@ -254,14 +254,17 @@ def _get_user_id_from_token(request):
         return None, jsonify({"error": "Authorization token is required"}), 401
     
     token = auth_header.split(' ')[1]
-    payload = verify_apple_token(token)
+    
+    # --- FIX: Call the new function that returns two values ---
+    payload, status = verify_apple_token(token)
     
     if not payload:
-        return None, jsonify({"error": "Invalid or expired token"}), 401
+        # Pass the detailed error code back
+        return None, jsonify({"error": "Invalid or expired token", "status_code": status}), 401
     
-    user_id = payload.get('sub') # 'sub' (subject) is the user's unique ID
+    user_id = payload.get('sub')
     if not user_id:
-        logger.error("Token payload verified but missing 'sub' (user_id).")
+        logger.error("AUTH_FAILURE: Token payload verified but missing 'sub' (user_id).")
         return None, jsonify({"error": "Invalid token payload"}), 401
         
     return user_id, None, None
@@ -457,30 +460,27 @@ def get_grade_updates():
 
 @app.route('/users', methods=['POST'])
 def create_user():
-    if not request.is_json:
-        return jsonify({"error": "Request must be JSON"}), 400
-    
+    if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
     data = request.get_json()
     token = data.get('identityToken')
-    
-    if not token:
-        return jsonify({"error": "identityToken is required"}), 400
+    if not token: return jsonify({"error": "identityToken is required"}), 400
 
-    # Updated call to get payload and error status
+    # --- FIX: Call the new function and get the 'sub' field ---
     payload, status = verify_apple_token(token)
     
     if not payload:
-        # Return a more specific error based on the failure
         return jsonify({"error": "Invalid token", "status_code": status}), 400
-    
+
     user_id = payload.get('sub')
     if not user_id:
          logger.error("AUTH_FAILURE: Token payload verified but missing 'sub' (user_id) during user creation.")
-         return jsonify({"error": "Invalid token payload", "status_code": "TOKEN_PAYLOAD_ERROR"}), 400
+         return jsonify({"error": "Invalid token payload"}), 400
+    # --- END FIX ---
 
     insert_query = "INSERT INTO users (id) VALUES (%s) ON CONFLICT (id) DO NOTHING;"
     try:
-        with DatabaseConnection() as conn: # Assumes DatabaseConnection is in your file
+        # This function is now safe to call
+        with DatabaseConnection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(insert_query, (user_id,))
             conn.commit()
