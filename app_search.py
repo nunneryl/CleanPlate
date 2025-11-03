@@ -501,7 +501,7 @@ def add_favorite():
     if user_id:
         cache.delete(f"user_{user_id}_/favorites")
 
-    insert_query = "INSERT INTO favorites (user_id, camis) VALUES (%s, %s) ON CONFLICT (user_id, camis) DO NOTHING;"
+    insert_query = "INSERT INTO favorites (user_id, restaurant_camis) VALUES (%s, %s) ON CONFLICT (user_id, restaurant_camis) DO NOTHING;"
     try:
         with DatabaseConnection() as conn:
             with conn.cursor() as cursor:
@@ -522,7 +522,7 @@ def get_favorites():
         SELECT r.*, v.violation_code, v.violation_description 
         FROM restaurants r 
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date 
-        WHERE r.camis IN (SELECT favorites.camis FROM favorites WHERE user_id = %s)
+        WHERE r.camis IN (SELECT favorites.restaurant_camis FROM favorites WHERE user_id = %s)
     """
     try:
         all_rows = _execute_query(query, (user_id,))
@@ -542,7 +542,7 @@ def remove_favorite(camis):
     if user_id:
         cache.delete(f"user_{user_id}_/favorites")
 
-    delete_query = "DELETE FROM favorites WHERE user_id = %s AND camis = %s;"
+    delete_query = "DELETE FROM favorites WHERE user_id = %s AND restaurant_camis = %s;"
     try:
         with DatabaseConnection() as conn:
             with conn.cursor() as cursor:
