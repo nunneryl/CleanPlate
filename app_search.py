@@ -522,7 +522,7 @@ def get_favorites():
         SELECT r.*, v.violation_code, v.violation_description 
         FROM restaurants r 
         LEFT JOIN violations v ON r.camis = v.camis AND r.inspection_date = v.inspection_date 
-        WHERE r.camis IN (SELECT camis FROM favorites WHERE user_id = %s)
+        WHERE r.camis IN (SELECT favorites.camis FROM favorites WHERE user_id = %s)
     """
     try:
         all_rows = _execute_query(query, (user_id,))
