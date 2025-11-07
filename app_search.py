@@ -553,23 +553,6 @@ def remove_favorite(camis):
         logger.error(f"Failed to delete favorite for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
 
-@app.route('/users', methods=['DELETE'])
-def delete_user():
-    user_id, error_response, status_code = _get_user_id_from_token(request)
-    if error_response: return error_response, status_code
-
-    delete_query = "DELETE FROM users WHERE id = %s;"
-    try:
-        with DatabaseConnection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(delete_query, (user_id,))
-            conn.commit()
-        logger.info(f"User {user_id} and all associated data have been deleted.")
-        return jsonify({"status": "success", "message": "User deleted successfully."}), 200
-    except Exception as e:
-        logger.error(f"Failed to delete user {user_id}: {e}", exc_info=True)
-        return jsonify({"error": "Database operation failed"}), 500
-
 @app.route('/recent-searches', methods=['POST'])
 def save_recent_search():
     user_id, error_response, status_code = _get_user_id_from_token(request)
