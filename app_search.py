@@ -455,6 +455,7 @@ def get_grade_updates():
             item['update_type'] = update_type
             if update_type == 'finalized': item['grade'] = item.pop('new_grade', None); item['grade_date'] = item.pop('finalized_date', None)
     return jsonify(shaped_results)
+    
 
 # --- USER & FAVORITES ROUTES (From Production) ---
 
@@ -487,6 +488,39 @@ def delete_user():
         if conn:
             conn.rollback() # Rollback on error
         logger.error(f"Failed to delete user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Database operation failed"}), 500
+        
+@app.route('/users', methods=['POST'])
+def create_user():
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+    
+    data = request.get_json()
+    token = data.get('identityToken')
+    
+    if not token:
+        return jsonify({"error": "identityToken is required"}), 400
+
+    # Call the function that returns two values
+    payload, status = verify_apple_token(token)
+    
+    if not payload:
+        return jsonify({"error": "Invalid token", "status_code": status}), 400
+
+    user_id = payload.get('sub')
+    if not user_id:
+         logger.error("AUTH_FAILURE: Token payload verified but missing 'sub' (user_id) during user creation.")
+         return jsonify({"error": "Invalid token payload"}), 400
+
+    insert_query = "INSERT INTO users (id) VALUES (%s) ON CONFLICT (id) DO NOTHING;"
+    try:
+        with DatabaseConnection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(insert_query, (user_id,))
+            conn.commit()
+        return jsonify({"status": "success", "message": "User created or already exists."}), 201
+    except Exception as e:
+        logger.error(f"Failed to insert user into database: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
 
 @app.route('/favorites', methods=['POST'])
