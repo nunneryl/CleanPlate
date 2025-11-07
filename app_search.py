@@ -458,35 +458,35 @@ def get_grade_updates():
 
 # --- USER & FAVORITES ROUTES (From Production) ---
 
-@app.route('/users', methods=['POST'])
-def create_user():
-    if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
-    data = request.get_json()
-    token = data.get('identityToken')
-    if not token: return jsonify({"error": "identityToken is required"}), 400
-
-    # --- FIX: Call the new function and get the 'sub' field ---
-    payload, status = verify_apple_token(token)
+@app.route('/users', methods=['DELETE'])
+def delete_user():
+    user_id, error_response, status_code = _get_user_id_from_token(request)
+    if error_response: return error_response, status_code
     
-    if not payload:
-        return jsonify({"error": "Invalid token", "status_code": status}), 400
-
-    user_id = payload.get('sub')
-    if not user_id:
-         logger.error("AUTH_FAILURE: Token payload verified but missing 'sub' (user_id) during user creation.")
-         return jsonify({"error": "Invalid token payload"}), 400
-    # --- END FIX ---
-
-    insert_query = "INSERT INTO users (id) VALUES (%s) ON CONFLICT (id) DO NOTHING;"
+    conn = None # Initialize connection variable
     try:
-        # This function is now safe to call
         with DatabaseConnection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(insert_query, (user_id,))
-            conn.commit()
-        return jsonify({"status": "success", "message": "User created or already exists."}), 201
+                
+                # --- FIX: Delete associated data first ---
+                logger.info(f"Deleting favorites for user {user_id}...")
+                cursor.execute("DELETE FROM favorites WHERE user_id = %s;", (user_id,))
+                
+                logger.info(f"Deleting recent searches for user {user_id}...")
+                cursor.execute("DELETE FROM recent_searches WHERE user_id = %s;", (user_id,))
+                
+                # Now delete the user
+                logger.info(f"Deleting user {user_id} from users table...")
+                cursor.execute("DELETE FROM users WHERE id = %s;", (user_id,))
+            
+            conn.commit() # Commit the transaction
+        
+        logger.info(f"User {user_id} and all associated data have been deleted.")
+        return jsonify({"status": "success", "message": "User deleted successfully."}), 200
     except Exception as e:
-        logger.error(f"Failed to insert user into database: {e}", exc_info=True)
+        if conn:
+            conn.rollback() # Rollback on error
+        logger.error(f"Failed to delete user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
 
 @app.route('/favorites', methods=['POST'])
