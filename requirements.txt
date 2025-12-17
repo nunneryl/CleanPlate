@@ -1,7 +1,6 @@
 # forcing a fresh build on railway
 flask==2.2.5
 werkzeug==3.0.6
-flask-cors==6.0.0
 psycopg[binary]>=3.1.0
 psycopg_pool
 requests==2.32.4

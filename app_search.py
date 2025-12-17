@@ -5,7 +5,6 @@ import logging
 import threading
 import secrets
 from flask import Flask, jsonify, request
-from flask_cors import CORS
 from flask_caching import Cache
 import psycopg
 from psycopg.rows import dict_row
@@ -23,7 +22,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)
 
 # --- CACHE CONFIGURATION ---
 cache_config = {
