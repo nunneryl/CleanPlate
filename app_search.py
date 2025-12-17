@@ -128,6 +128,63 @@ def make_user_cache_key(*args, **kwargs):
     # Fallback for non-user-specific endpoints, though not used by get_favorites
     return request.path
 
+# --- EMAIL HELPER ---
+
+def send_report_email(data):
+    """
+    Sends an issue report email using AOL SMTP.
+    Returns True on success, False on failure.
+    """
+    sender_email = os.environ.get('SENDER_EMAIL')
+    sender_password = os.environ.get('SENDER_PASSWORD')
+    receiver_email = os.environ.get('RECEIVER_EMAIL')
+
+    if not all([sender_email, sender_password, receiver_email]):
+        logger.error("Email configuration incomplete. Missing SENDER_EMAIL, SENDER_PASSWORD, or RECEIVER_EMAIL.")
+        return False
+
+    camis = data.get('camis', 'Unknown')
+    issue_type = data.get('issue_type', 'Unknown')
+    comments = data.get('comments', 'No comments provided')
+
+    subject = f"CleanPlate Issue Report: {issue_type} (CAMIS: {camis})"
+    body = f"""
+New Issue Report from CleanPlate App
+=====================================
+
+Restaurant CAMIS: {camis}
+Issue Type: {issue_type}
+
+User Comments:
+{comments}
+
+=====================================
+This is an automated message from CleanPlate.
+    """.strip()
+
+    msg = EmailMessage()
+    msg['Subject'] = subject
+    msg['From'] = sender_email
+    msg['To'] = receiver_email
+    msg.set_content(body)
+
+    try:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL('smtp.aol.com', 465, context=context) as server:
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+        logger.info(f"Issue report email sent successfully for CAMIS {camis}")
+        return True
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error(f"SMTP authentication failed: {e}")
+        return False
+    except smtplib.SMTPException as e:
+        logger.error(f"SMTP error sending report email: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error sending report email: {e}", exc_info=True)
+        return False
+
 # --- PUBLIC API ENDPOINTS ---
 
 @app.route('/search', methods=['GET'])
