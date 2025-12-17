@@ -96,15 +96,114 @@ def _shape_simple_restaurant_list(rows):
         shaped_results.append(restaurant_data)
     return shaped_results
 
-# --- SECURITY & AUTH HELPERS (UPDATED) ---
+# --- SECURITY & AUTH HELPERS ---
+
+# Apple Sign In Configuration
+APPLE_BUNDLE_ID = os.environ.get('APPLE_BUNDLE_ID', 'nunzo.CleanPlate')
+APPLE_KEYS_URL = "https://appleid.apple.com/auth/keys"
+APPLE_ISSUER = "https://appleid.apple.com"
+
+# Cache for Apple's public keys (refreshed periodically)
+_apple_public_keys_cache = {"keys": None, "fetched_at": 0}
+APPLE_KEYS_CACHE_DURATION = 3600  # 1 hour
+
+def _get_apple_public_keys():
+    """
+    Fetches and caches Apple's public keys for token verification.
+    Keys are cached for 1 hour to avoid excessive API calls.
+    """
+    import time
+    current_time = time.time()
+
+    # Return cached keys if still valid
+    if (_apple_public_keys_cache["keys"] is not None and
+        current_time - _apple_public_keys_cache["fetched_at"] < APPLE_KEYS_CACHE_DURATION):
+        return _apple_public_keys_cache["keys"]
+
+    try:
+        response = requests.get(APPLE_KEYS_URL, timeout=10)
+        response.raise_for_status()
+        keys = response.json().get("keys", [])
+
+        # Update cache
+        _apple_public_keys_cache["keys"] = keys
+        _apple_public_keys_cache["fetched_at"] = current_time
+        logger.info("Apple public keys fetched and cached successfully.")
+        return keys
+    except requests.RequestException as e:
+        logger.error(f"Failed to fetch Apple public keys: {e}")
+        # Return cached keys if available, even if expired
+        if _apple_public_keys_cache["keys"] is not None:
+            logger.warning("Using expired cached Apple public keys as fallback.")
+            return _apple_public_keys_cache["keys"]
+        return None
+
+def _get_apple_key_by_kid(kid):
+    """
+    Finds the Apple public key matching the given key ID (kid).
+    """
+    from jwt import algorithms
+
+    keys = _get_apple_public_keys()
+    if not keys:
+        return None
+
+    for key in keys:
+        if key.get("kid") == kid:
+            # Convert JWK to PEM format for PyJWT
+            return algorithms.RSAAlgorithm.from_jwk(key)
+
+    logger.error(f"No Apple public key found for kid: {kid}")
+    return None
 
 def verify_apple_token(token):
+    """
+    Verifies an Apple Sign In identity token.
+    Returns the user ID (sub claim) if valid, None otherwise.
+    """
     try:
-        logger.warning("SECURITY ALERT: Token signature verification is NOT IMPLEMENTED. This is insecure.")
-        unverified_payload = jwt.decode(token, options={"verify_signature": False})
-        return unverified_payload.get('sub')
+        # Decode header without verification to get the key ID
+        unverified_header = jwt.get_unverified_header(token)
+        kid = unverified_header.get("kid")
+
+        if not kid:
+            logger.error("Token missing 'kid' in header")
+            return None
+
+        # Get the matching public key from Apple
+        public_key = _get_apple_key_by_kid(kid)
+        if not public_key:
+            logger.error("Could not retrieve Apple public key for verification")
+            return None
+
+        # Verify and decode the token
+        payload = jwt.decode(
+            token,
+            public_key,
+            algorithms=["RS256"],
+            audience=APPLE_BUNDLE_ID,
+            issuer=APPLE_ISSUER
+        )
+
+        user_id = payload.get("sub")
+        if user_id:
+            logger.debug(f"Apple token verified successfully for user: {user_id[:8]}...")
+        return user_id
+
+    except jwt.ExpiredSignatureError:
+        logger.warning("Apple token has expired")
+        return None
+    except jwt.InvalidAudienceError:
+        logger.error(f"Token audience doesn't match. Expected: {APPLE_BUNDLE_ID}")
+        return None
+    except jwt.InvalidIssuerError:
+        logger.error(f"Token issuer invalid. Expected: {APPLE_ISSUER}")
+        return None
     except jwt.PyJWTError as e:
         logger.error(f"Token verification failed: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error during token verification: {e}", exc_info=True)
         return None
 
 def _get_user_id_from_token(request):
