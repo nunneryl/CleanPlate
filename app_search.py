@@ -286,6 +286,12 @@ This is an automated message from CleanPlate.
 
 # --- PUBLIC API ENDPOINTS ---
 
+# Input validation constants
+MAX_SEARCH_TERM_LENGTH = 200
+MAX_PAGE = 1000
+MAX_PER_PAGE = 100
+MIN_PER_PAGE = 1
+
 @app.route('/search', methods=['GET'])
 @cache.cached(timeout=3600, query_string=True)
 def search():
@@ -294,11 +300,19 @@ def search():
     boro_filter = request.args.get('boro', type=str)
     cuisine_filter = request.args.get('cuisine', type=str)
     sort_option = request.args.get('sort', type=str)
-    page = int(request.args.get('page', 1, type=int))
-    per_page = int(request.args.get('per_page', 25, type=int))
+
+    # Validate and bound pagination parameters
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 25, type=int)
+    page = max(1, min(MAX_PAGE, page))
+    per_page = max(MIN_PER_PAGE, min(MAX_PER_PAGE, per_page))
 
     if not search_term:
         return jsonify([])
+
+    # Validate search term length
+    if len(search_term) > MAX_SEARCH_TERM_LENGTH:
+        return jsonify({"error": f"Search term too long. Maximum {MAX_SEARCH_TERM_LENGTH} characters."}), 400
 
     normalized_search = normalize_search_term_for_hybrid(search_term)
     
@@ -517,6 +531,11 @@ def add_favorite():
     data = request.get_json()
     camis = data.get('camis')
     if not camis: return jsonify({"error": "Restaurant 'camis' is required"}), 400
+
+    # Validate camis format (should be numeric string, max 10 digits)
+    camis_str = str(camis)
+    if not camis_str.isdigit() or len(camis_str) > 10:
+        return jsonify({"error": "Invalid CAMIS format"}), 400
     
     if user_id:
         cache.delete(f"user_{user_id}_/favorites")
@@ -605,7 +624,11 @@ def save_recent_search():
     search_term = data.get('search_term')
     if not search_term or not search_term.strip():
         return jsonify({"error": "search_term is required and cannot be empty"}), 400
-    
+
+    # Validate search term length
+    if len(search_term) > MAX_SEARCH_TERM_LENGTH:
+        return jsonify({"error": f"Search term too long. Maximum {MAX_SEARCH_TERM_LENGTH} characters."}), 400
+
     search_term_display = search_term.strip()
     search_term_normalized = search_term_display.lower()
 
@@ -676,13 +699,31 @@ def delete_recent_searches():
 
 # --- ADMINISTRATIVE ENDPOINTS ---
 
+MAX_COMMENTS_LENGTH = 2000
+VALID_ISSUE_TYPES = {"Permanently Closed", "Wrong Address / Map Pin", "Wrong Restaurant Name", "Other"}
+
 @app.route('/report-issue', methods=['POST'])
 def report_issue():
     if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
     data = request.get_json()
     if not all(k in data for k in ["camis", "issue_type", "comments"]):
         return jsonify({"error": "Missing required fields"}), 400
-    
+
+    # Validate camis format
+    camis = str(data.get('camis', ''))
+    if not camis.isdigit() or len(camis) > 10:
+        return jsonify({"error": "Invalid CAMIS format"}), 400
+
+    # Validate issue type
+    issue_type = data.get('issue_type', '')
+    if issue_type not in VALID_ISSUE_TYPES:
+        return jsonify({"error": f"Invalid issue type. Must be one of: {', '.join(VALID_ISSUE_TYPES)}"}), 400
+
+    # Validate comments length
+    comments = data.get('comments', '')
+    if len(comments) > MAX_COMMENTS_LENGTH:
+        return jsonify({"error": f"Comments too long. Maximum {MAX_COMMENTS_LENGTH} characters."}), 400
+
     if send_report_email(data):
         return jsonify({"status": "success", "message": "Report received."}), 200
     else:
