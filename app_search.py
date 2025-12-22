@@ -599,12 +599,20 @@ def delete_user():
     user_id, error_response, status_code = _get_user_id_from_token(request)
     if error_response: return error_response, status_code
 
-    delete_query = "DELETE FROM users WHERE id = %s;"
     try:
         with DatabaseConnection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(delete_query, (user_id,))
+                # Delete user's favorites first
+                cursor.execute("DELETE FROM favorites WHERE user_id = %s;", (user_id,))
+                # Delete user's recent searches
+                cursor.execute("DELETE FROM recent_searches WHERE user_id = %s;", (user_id,))
+                # Finally delete the user
+                cursor.execute("DELETE FROM users WHERE id = %s;", (user_id,))
             conn.commit()
+
+        # Clear user's cache
+        cache.delete(f"user_{user_id}_/favorites")
+
         logger.info(f"User {user_id} and all associated data have been deleted.")
         return jsonify({"status": "success", "message": "User deleted successfully."}), 200
     except Exception as e:
