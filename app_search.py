@@ -6,6 +6,8 @@ import threading
 import secrets
 from flask import Flask, jsonify, request
 from flask_caching import Cache
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import psycopg
 from psycopg.rows import dict_row
 import smtplib
@@ -22,6 +24,17 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# --- RATE LIMITING CONFIGURATION ---
+# Uses Redis for distributed rate limiting across workers
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    storage_uri=os.environ.get('REDIS_URL', 'memory://'),
+    storage_options={"socket_connect_timeout": 5},
+    strategy="fixed-window",
+    default_limits=["200 per day", "60 per hour"]  # Default limits for all endpoints
+)
 
 # --- CACHE CONFIGURATION ---
 cache_config = {
@@ -291,6 +304,7 @@ MAX_PER_PAGE = 100
 MIN_PER_PAGE = 1
 
 @app.route('/search', methods=['GET'])
+@limiter.limit("60 per minute")  # Allow 60 searches per minute per IP
 @cache.cached(timeout=3600, query_string=True)
 def search():
     search_term = request.args.get('name', '').strip()
@@ -500,6 +514,7 @@ def get_recent_actions():
         return jsonify({"error": "Database query failed"}), 500
 
 @app.route('/users', methods=['POST'])
+@limiter.limit("10 per minute")  # Limit account creation attempts
 def create_user():
     if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
     data = request.get_json()
@@ -522,6 +537,7 @@ def create_user():
         return jsonify({"error": "Database operation failed"}), 500
 
 @app.route('/favorites', methods=['POST'])
+@limiter.limit("30 per minute")  # Reasonable limit for user actions
 def add_favorite():
     user_id, error_response, status_code = _get_user_id_from_token(request)
     if error_response: return error_response, status_code
@@ -620,6 +636,7 @@ def delete_user():
         return jsonify({"error": "Database operation failed"}), 500
 
 @app.route('/recent-searches', methods=['POST'])
+@limiter.limit("30 per minute")  # Reasonable limit for user actions
 def save_recent_search():
     user_id, error_response, status_code = _get_user_id_from_token(request)
     if error_response: return error_response, status_code
@@ -709,6 +726,7 @@ MAX_COMMENTS_LENGTH = 2000
 VALID_ISSUE_TYPES = {"Permanently Closed", "Wrong Address / Map Pin", "Wrong Restaurant Name", "Other"}
 
 @app.route('/report-issue', methods=['POST'])
+@limiter.limit("5 per minute")  # Strict limit to prevent spam reports
 def report_issue():
     if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
     data = request.get_json()
@@ -736,6 +754,7 @@ def report_issue():
         return jsonify({"status": "error", "message": "Failed to process report."}), 500
 
 @app.route('/trigger-update', methods=['POST'])
+@limiter.limit("5 per hour")  # Admin endpoint - very restrictive
 def trigger_update():
     try:
         from update_database import run_database_update
@@ -751,6 +770,7 @@ def trigger_update():
     return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
 
 @app.route('/clear-cache', methods=['POST'])
+@limiter.limit("10 per hour")  # Admin endpoint - restrictive
 def clear_cache():
     provided_key = request.headers.get('X-Update-Secret')
     expected_key = APIConfig.UPDATE_SECRET_KEY
@@ -762,6 +782,14 @@ def clear_cache():
     return jsonify({"status": "success", "message": "Cache cleared."}), 200
 
 # --- ERROR HANDLERS ---
+
+@app.errorhandler(429)
+def ratelimit_error_handler(error):
+    logger.warning(f"Rate limit exceeded: {request.remote_addr} on {request.path}")
+    return jsonify({
+        "error": "Rate limit exceeded",
+        "message": "Too many requests. Please try again later."
+    }), 429
 
 @app.errorhandler(404)
 def not_found_error_handler(error):
