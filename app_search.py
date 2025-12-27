@@ -356,40 +356,22 @@ def get_restaurant_by_camis(camis):
 @app.route('/lists/recent-actions', methods=['GET'])
 @cache.cached(timeout=3600)
 def get_recent_actions():
-    # Query restaurants that were recently graded (from grade_updates table)
-    # We use the new_grade from grade_updates as the display grade, not the
-    # most recent inspection's grade (which might be NULL for pending inspections)
     graded_query = """
-        WITH recent_grade_updates AS (
-            -- Get the most recent grade update per restaurant in the last 14 days
-            -- Only include actual grades (A, B, C), not pending or null
-            SELECT DISTINCT ON (restaurant_camis)
-                restaurant_camis,
-                new_grade,
-                previous_grade,
-                update_date,
-                update_type
-            FROM grade_updates
-            WHERE update_date >= (NOW() - INTERVAL '14 days')
-              AND new_grade IS NOT NULL
-              AND new_grade IN ('A', 'B', 'C')
-            ORDER BY restaurant_camis, update_date DESC
-        ),
-        latest_restaurant_info AS (
-            -- Get the latest restaurant info (name, address, etc.) for each CAMIS
-            SELECT DISTINCT ON (camis) *
-            FROM restaurants
-            ORDER BY camis, inspection_date DESC
-        )
-        SELECT
+        SELECT 
             r.*,
             gu.new_grade as grade,
             gu.update_date as sort_date,
             gu.update_type,
             gu.previous_grade
-        FROM recent_grade_updates gu
-
-        JOIN latest_restaurant_info r ON gu.restaurant_camis = r.camis
+        FROM grade_updates gu
+        JOIN (
+            SELECT DISTINCT ON (camis) *
+            FROM restaurants
+            ORDER BY camis, inspection_date DESC
+        ) r ON gu.restaurant_camis = r.camis
+        WHERE gu.update_date >= (NOW() - INTERVAL '14 days')
+          AND gu.new_grade IS NOT NULL
+          AND gu.new_grade IN ('A', 'B', 'C')
         ORDER BY gu.update_date DESC
         LIMIT 200;
     """
