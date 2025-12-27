@@ -382,40 +382,13 @@ def get_recent_actions():
             ORDER BY camis, inspection_date DESC
         )
         SELECT
-            r.camis,
-            r.dba,
-            r.building,
-            r.street,
-            r.boro,
-            r.zipcode,
-            r.phone,
-            r.cuisine_description,
-            gu.new_grade as grade,  -- Use the finalized grade from grade_updates
-            r.grade_date,
-            r.latitude,
-            r.longitude,
-            r.foursquare_fsq_id,
-            r.google_place_id,
-            r.google_rating,
-            r.google_ratings_count,
-            r.google_photo_ref_1,
-            r.google_photo_ref_2,
-            r.price_level,
-            r.hours_mon,
-            r.hours_tue,
-            r.hours_wed,
-            r.hours_thu,
-            r.hours_fri,
-            r.hours_sat,
-            r.hours_sun,
-            r.inspection_date,
-            r.critical_flag,
-            r.inspection_type,
-            r.action,
+            r.*,
+            gu.new_grade as grade,
             gu.update_date as sort_date,
             gu.update_type,
             gu.previous_grade
         FROM recent_grade_updates gu
+
         JOIN latest_restaurant_info r ON gu.restaurant_camis = r.camis
         ORDER BY gu.update_date DESC
         LIMIT 200;
