@@ -510,8 +510,8 @@ def get_restaurant(camis):
 @limiter.limit("30 per minute")
 def get_recent_actions():
     """
-    Get recently graded restaurants using the grade_updates table.
-    Shows upgrades, downgrades, and new grades.
+    Get recently graded, closed, and reopened restaurants.
+    Returns full Restaurant objects as expected by iOS.
     """
     cache_key = "recent_actions"
     cached_result = cache.get(cache_key)
@@ -521,58 +521,52 @@ def get_recent_actions():
     try:
         with pool.connection() as conn:
             with conn.cursor() as cur:
-                # Get recent grade updates with restaurant info
+                # Get recently graded restaurants (full Restaurant objects)
                 cur.execute("""
-                    SELECT 
-                        g.restaurant_camis,
-                        g.previous_grade,
-                        g.new_grade,
-                        g.update_date,
-                        g.update_type,
-                        g.inspection_date,
-                        r.dba,
-                        r.boro,
-                        r.cuisine_description
+                    SELECT DISTINCT ON (g.restaurant_camis)
+                        r.camis, r.dba, r.building, r.street, r.boro, r.zipcode,
+                        r.phone, r.cuisine_description, r.grade, r.grade_date,
+                        r.latitude, r.longitude, r.google_rating, r.google_review_count,
+                        g.update_type, g.update_date
                     FROM grade_updates g
                     JOIN (
-                        SELECT DISTINCT ON (camis) camis, dba, boro, cuisine_description
+                        SELECT DISTINCT ON (camis) *
                         FROM restaurants
                         ORDER BY camis, inspection_date DESC
                     ) r ON g.restaurant_camis = r.camis
-                    ORDER BY g.update_date DESC
-                    LIMIT 50
+                    ORDER BY g.restaurant_camis, g.update_date DESC
                 """)
                 
-                rows = cur.fetchall()
+                graded_rows = cur.fetchall()
                 
-                recently_graded = []
-                upgrades = []
-                downgrades = []
-                
-                for row in rows:
-                    item = {
+                # Sort by update_date descending and limit to 50
+                recently_graded = sorted([
+                    {
                         "camis": row[0],
-                        "previous_grade": row[1],
-                        "new_grade": row[2],
-                        "update_date": row[3].isoformat() if row[3] else None,
-                        "update_type": row[4],
-                        "inspection_date": row[5].isoformat() if row[5] else None,
-                        "dba": row[6],
-                        "boro": row[7],
-                        "cuisine_description": row[8],
+                        "dba": row[1],
+                        "building": row[2],
+                        "street": row[3],
+                        "boro": row[4],
+                        "zipcode": row[5],
+                        "phone": row[6],
+                        "cuisine_description": row[7],
+                        "grade": row[8],
+                        "grade_date": row[9].isoformat() if row[9] else None,
+                        "latitude": float(row[10]) if row[10] else None,
+                        "longitude": float(row[11]) if row[11] else None,
+                        "google_rating": float(row[12]) if row[12] else None,
+                        "google_review_count": row[13],
+                        "update_type": row[14],
+                        "activity_date": row[15].isoformat() if row[15] else None,
                     }
-                    
-                    recently_graded.append(item)
-                    
-                    if row[4] == "upgrade":
-                        upgrades.append(item)
-                    elif row[4] == "downgrade":
-                        downgrades.append(item)
+                    for row in graded_rows
+                ], key=lambda x: x["activity_date"] or "", reverse=True)[:50]
                 
+                # Return empty arrays for closed/reopened for now
                 result = {
                     "recently_graded": recently_graded,
-                    "upgrades": upgrades[:20],
-                    "downgrades": downgrades[:20],
+                    "recently_closed": [],
+                    "recently_reopened": [],
                 }
                 
                 cache.set(cache_key, result, timeout=900)
@@ -811,7 +805,7 @@ def get_recent_searches():
         with pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT search_term_display, created_at
+                    SELECT id, search_term_display, created_at
                     FROM recent_searches
                     WHERE user_id = %s
                     ORDER BY created_at DESC
@@ -820,8 +814,9 @@ def get_recent_searches():
                 
                 results = [
                     {
-                        "search_term": row[0],
-                        "created_at": row[1].isoformat() if row[1] else None,
+                        "id": row[0],
+                        "search_term_display": row[1],
+                        "created_at": row[2].isoformat() if row[2] else None,
                     }
                     for row in cur.fetchall()
                 ]
