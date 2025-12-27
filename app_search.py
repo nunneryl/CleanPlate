@@ -360,19 +360,47 @@ def get_recent_actions():
     action_results = []
     
     graded_query = """
-        WITH latest_per_restaurant AS (
-            SELECT DISTINCT ON (camis) *
+        WITH grade_update_restaurants AS (
+            -- Restaurants from grade_updates table (B/C grades finalized from pending)
+            SELECT DISTINCT ON (gu.restaurant_camis)
+                r.*,
+                gu.new_grade as display_grade,
+                gu.update_type,
+                gu.previous_grade,
+                gu.update_date as sort_date
+            FROM grade_updates gu
+            JOIN (
+                SELECT DISTINCT ON (camis) *
+                FROM restaurants
+                ORDER BY camis, inspection_date DESC
+            ) r ON gu.restaurant_camis = r.camis
+            WHERE gu.update_date >= (NOW() - INTERVAL '30 days')
+              AND gu.new_grade IN ('A', 'B', 'C')
+            ORDER BY gu.restaurant_camis, gu.update_date DESC
+        ),
+        recent_grade_date_restaurants AS (
+            -- Fallback: Restaurants with recent grade_date (immediate A grades)
+            SELECT DISTINCT ON (camis) 
+                *,
+                grade as display_grade,
+                NULL as update_type,
+                NULL as previous_grade,
+                grade_date as sort_date
             FROM restaurants
+            WHERE grade IN ('A', 'B', 'C')
+              AND grade_date >= (NOW() - INTERVAL '30 days')
+              AND camis NOT IN (SELECT camis FROM grade_update_restaurants)
             ORDER BY camis, inspection_date DESC
+        ),
+        combined AS (
+            SELECT * FROM grade_update_restaurants
+            UNION ALL
+            SELECT * FROM recent_grade_date_restaurants
         )
-        SELECT *
-        FROM latest_per_restaurant
-        WHERE grade IN ('A', 'B', 'C')
-          AND grade_date >= (NOW() - INTERVAL '30 days')
-        ORDER BY grade_date DESC
+        SELECT * FROM combined
+        ORDER BY sort_date DESC
         LIMIT 200;
     """
-
 
     # Query for closed/reopened restaurants
     actions_query = """
