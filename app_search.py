@@ -359,25 +359,20 @@ def get_recent_actions():
     graded_results = []
     action_results = []
     
-    # Query for recently graded restaurants
     graded_query = """
-        SELECT 
-            r.*,
-            gu.new_grade as display_grade,
-            gu.update_type,
-            gu.previous_grade
-        FROM grade_updates gu
-        JOIN (
+        WITH latest_per_restaurant AS (
             SELECT DISTINCT ON (camis) *
             FROM restaurants
             ORDER BY camis, inspection_date DESC
-        ) r ON gu.restaurant_camis = r.camis
-        WHERE gu.update_date >= (NOW() - INTERVAL '14 days')
-          AND gu.new_grade IS NOT NULL
-          AND gu.new_grade IN ('A', 'B', 'C')
-        ORDER BY gu.update_date DESC
+        )
+        SELECT *
+        FROM latest_per_restaurant
+        WHERE grade IN ('A', 'B', 'C')
+          AND grade_date >= (NOW() - INTERVAL '30 days')
+        ORDER BY grade_date DESC
         LIMIT 200;
     """
+
 
     # Query for closed/reopened restaurants
     actions_query = """
