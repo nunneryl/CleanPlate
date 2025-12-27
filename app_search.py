@@ -354,20 +354,16 @@ def get_restaurant_by_camis(camis):
     return jsonify(final_results[0])
 
 @app.route('/lists/recent-actions', methods=['GET'])
-# @cache.cached(timeout=3600)
+# @cache.cached(timeout=3600)  # Keep disabled for now
 def get_recent_actions():
-    # Temporary debug version - return empty arrays
-    return jsonify({
-        "recently_graded": [],
-        "recently_closed": [],
-        "recently_reopened": []
-    })
-
+    graded_results = []
+    action_results = []
+    
+    # Query for recently graded restaurants
     graded_query = """
         SELECT 
             r.*,
-            gu.new_grade as grade,
-            gu.update_date as sort_date,
+            gu.new_grade as display_grade,
             gu.update_type,
             gu.previous_grade
         FROM grade_updates gu
@@ -383,6 +379,7 @@ def get_recent_actions():
         LIMIT 200;
     """
 
+    # Query for closed/reopened restaurants
     actions_query = """
         WITH latest_inspections AS (
             SELECT DISTINCT ON (camis) *
@@ -400,24 +397,34 @@ def get_recent_actions():
         with DatabaseConnection() as conn:
             conn.row_factory = dict_row
             with conn.cursor() as cursor:
-                cursor.execute(graded_query)
-                graded_results = cursor.fetchall()
+                try:
+                    cursor.execute(graded_query)
+                    graded_results = cursor.fetchall()
+                    logger.info(f"Graded query returned {len(graded_results)} results")
+                except Exception as e:
+                    logger.error(f"Graded query failed: {e}")
+                    graded_results = []
 
-                cursor.execute(actions_query)
-                action_results = cursor.fetchall()
+                try:
+                    cursor.execute(actions_query)
+                    action_results = cursor.fetchall()
+                    logger.info(f"Actions query returned {len(action_results)} results")
+                except Exception as e:
+                    logger.error(f"Actions query failed: {e}")
+                    action_results = []
 
-            closed_rows = [row for row in action_results if 'closed' in row.get('action', '').lower()]
-            reopened_rows = [row for row in action_results if 're-opened' in row.get('action', '').lower()]
+        closed_rows = [row for row in action_results if 'closed' in row.get('action', '').lower()]
+        reopened_rows = [row for row in action_results if 're-opened' in row.get('action', '').lower()]
 
-            shaped_graded = _shape_simple_restaurant_list(graded_results)
-            shaped_closed = _shape_simple_restaurant_list(closed_rows)
-            shaped_reopened = _shape_simple_restaurant_list(reopened_rows)
+        shaped_graded = _shape_simple_restaurant_list(graded_results)
+        shaped_closed = _shape_simple_restaurant_list(closed_rows)
+        shaped_reopened = _shape_simple_restaurant_list(reopened_rows)
 
-            return jsonify({
-                "recently_graded": shaped_graded,
-                "recently_closed": shaped_closed,
-                "recently_reopened": shaped_reopened
-            })
+        return jsonify({
+            "recently_graded": shaped_graded,
+            "recently_closed": shaped_closed,
+            "recently_reopened": shaped_reopened
+        })
             
     except Exception as e:
         logger.error(f"DB query for recent-actions list failed: {e}", exc_info=True)
