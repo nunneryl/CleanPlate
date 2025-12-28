@@ -16,10 +16,22 @@ import ssl
 from email.message import EmailMessage
 import jwt
 import requests
+import sentry_sdk
+from sentry_sdk.integrations.flask import FlaskIntegration
 
 from db_manager import DatabaseConnection
 from utils import normalize_search_term_for_hybrid
-from config import APIConfig
+from config import APIConfig, SentryConfig
+
+if SentryConfig.SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SentryConfig.SENTRY_DSN,
+        integrations=[FlaskIntegration()],
+        traces_sample_rate=0.1,
+        profiles_sample_rate=0.1,
+        environment=os.environ.get("RAILWAY_ENVIRONMENT", "development"),
+    )
+    logging.info("Sentry initialized successfully")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 logger = logging.getLogger(__name__)
@@ -324,8 +336,10 @@ def search():
 @app.route('/restaurant/<string:camis>', methods=['GET'])
 @cache.cached(timeout=3600)
 def get_restaurant_by_camis(camis):
-    if not camis.isdigit():
-        return jsonify({"error": "Invalid CAMIS format"}), 400
+# CAMIS validation: must be digits only and 8 characters (NYC standard)
+    if not camis.isdigit() or len(camis) != 8:
+        return jsonify({"error": "Invalid CAMIS format - must be 8 digits"}), 400
+
     
     try:
         with DatabaseConnection() as conn:
