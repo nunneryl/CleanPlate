@@ -12,7 +12,7 @@ from config import APIConfig
 # --- Constants ---
 PENDING_GRADES = {'P', 'Z', 'N', None, ''}
 FINAL_GRADES = {'A', 'B', 'C'}
-BATCH_SIZE = 400
+BATCH_SIZE = 50
 
 # --- Logger Setup ---
 logger = logging.getLogger(__name__)
