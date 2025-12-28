@@ -361,10 +361,9 @@ def get_recent_actions():
     
     graded_query = """
         WITH grade_update_restaurants AS (
-            -- Restaurants from grade_updates table (B/C grades finalized from pending)
             SELECT DISTINCT ON (gu.restaurant_camis)
                 r.*,
-                gu.new_grade as display_grade,
+                gu.new_grade as grade,
                 gu.update_type,
                 gu.previous_grade,
                 gu.update_date as sort_date
@@ -377,27 +376,8 @@ def get_recent_actions():
             WHERE gu.update_date >= (NOW() - INTERVAL '180 days')
               AND gu.new_grade IN ('A', 'B', 'C')
             ORDER BY gu.restaurant_camis, gu.update_date DESC
-        ),
-        recent_grade_date_restaurants AS (
-            -- Fallback: Restaurants with recent grade_date (immediate A grades)
-            SELECT DISTINCT ON (camis) 
-                *,
-                grade as display_grade,
-                NULL as update_type,
-                NULL as previous_grade,
-                grade_date as sort_date
-            FROM restaurants
-            WHERE grade IN ('A', 'B', 'C')
-              AND grade_date >= (NOW() - INTERVAL '30 days')
-              AND camis NOT IN (SELECT camis FROM grade_update_restaurants)
-            ORDER BY camis, inspection_date DESC
-        ),
-        combined AS (
-            SELECT * FROM grade_update_restaurants
-            UNION ALL
-            SELECT * FROM recent_grade_date_restaurants
         )
-        SELECT * FROM combined
+        SELECT * FROM grade_update_restaurants
         ORDER BY sort_date DESC
         LIMIT 200;
     """
