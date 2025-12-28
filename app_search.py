@@ -354,7 +354,7 @@ def get_restaurant_by_camis(camis):
     return jsonify(final_results[0])
 
 @app.route('/lists/recent-actions', methods=['GET'])
-# @cache.cached(timeout=3600)  # Keep disabled for now
+@cache.cached(timeout=3600)
 def get_recent_actions():
     graded_results = []
     action_results = []
