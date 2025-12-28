@@ -374,7 +374,7 @@ def get_recent_actions():
                 FROM restaurants
                 ORDER BY camis, inspection_date DESC
             ) r ON gu.restaurant_camis = r.camis
-            WHERE gu.update_date >= (NOW() - INTERVAL '30 days')
+            WHERE gu.update_date >= (NOW() - INTERVAL '180 days')
               AND gu.new_grade IN ('A', 'B', 'C')
             ORDER BY gu.restaurant_camis, gu.update_date DESC
         ),
