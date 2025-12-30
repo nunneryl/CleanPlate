@@ -166,6 +166,11 @@ def update_database_batch(data):
                 if existing_record and existing_record['grade'] in PENDING_GRADES and new_grade in FINAL_GRADES and not already_logged:
                     logger.info(f"Grade Finalized DETECTED for CAMIS {camis} on {inspection_date}: {existing_record['grade'] or 'NULL'} -> {new_grade}")
                     grade_updates_to_insert.append((camis, existing_record['grade'], new_grade, 'finalized', inspection_date))
+                
+                # Also capture new inspections that come in with immediate grades
+                elif not existing_record and new_grade in FINAL_GRADES and not already_logged:
+                    logger.info(f"New Graded Inspection for CAMIS {camis} on {inspection_date}: {new_grade}")
+                    grade_updates_to_insert.append((camis, None, new_grade, 'new_inspection', inspection_date))
 
                 dba = details_item.get("dba")
                 normalized_dba = normalize_search_term_for_hybrid(dba) if dba else None
