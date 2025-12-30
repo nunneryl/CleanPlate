@@ -374,27 +374,66 @@ def get_recent_actions():
     action_results = []
     
     graded_query = """
-        WITH grade_update_restaurants AS (
-            SELECT DISTINCT ON (gu.restaurant_camis)
-                r.*,
-                gu.new_grade as grade,
-                gu.update_type,
-                gu.previous_grade,
-                gu.update_date as sort_date
-            FROM grade_updates gu
-            JOIN (
-                SELECT DISTINCT ON (camis) *
-                FROM restaurants
-                ORDER BY camis, inspection_date DESC
-            ) r ON gu.restaurant_camis = r.camis
-            WHERE gu.update_date >= (NOW() - INTERVAL '180 days')
-              AND gu.new_grade IN ('A', 'B', 'C')
-            ORDER BY gu.restaurant_camis, gu.update_date DESC
+        WITH recent_grade_updates AS (
+            -- Get restaurants that had a grade finalized in the last 60 days
+            SELECT DISTINCT ON (restaurant_camis)
+                restaurant_camis,
+                update_date,
+                update_type,
+                previous_grade
+            FROM grade_updates
+            WHERE update_date >= (NOW() - INTERVAL '60 days')
+              AND new_grade IS NOT NULL
+              AND new_grade IN ('A', 'B', 'C')
+            ORDER BY restaurant_camis, update_date DESC
+        ),
+        latest_restaurant_info AS (
+            -- Get the latest inspection record for each restaurant
+            SELECT DISTINCT ON (camis) *
+            FROM restaurants
+            ORDER BY camis, inspection_date DESC
         )
-        SELECT * FROM grade_update_restaurants
-        ORDER BY sort_date DESC
+        SELECT
+            r.camis,
+            r.dba,
+            r.building,
+            r.street,
+            r.boro,
+            r.zipcode,
+            r.phone,
+            r.cuisine_description,
+            r.grade,  -- CURRENT grade from restaurants table (matches DOHMH)
+            r.grade_date,
+            r.latitude,
+            r.longitude,
+            r.foursquare_fsq_id,
+            r.google_place_id,
+            r.google_rating,
+            r.google_ratings_count,
+            r.google_photo_ref_1,
+            r.google_photo_ref_2,
+            r.price_level,
+            r.hours_mon,
+            r.hours_tue,
+            r.hours_wed,
+            r.hours_thu,
+            r.hours_fri,
+            r.hours_sat,
+            r.hours_sun,
+            r.inspection_date,
+            r.critical_flag,
+            r.inspection_type,
+            r.action,
+            gu.update_date as sort_date,
+            gu.update_type,
+            gu.previous_grade
+        FROM recent_grade_updates gu
+        JOIN latest_restaurant_info r ON gu.restaurant_camis = r.camis
+        WHERE r.grade IS NOT NULL AND r.grade IN ('A', 'B', 'C')
+        ORDER BY gu.update_date DESC
         LIMIT 200;
     """
+
 
     # Query for closed/reopened restaurants
     actions_query = """
