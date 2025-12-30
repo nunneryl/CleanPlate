@@ -379,9 +379,11 @@ def get_recent_actions():
                 restaurant_camis,
                 update_date,
                 update_type,
-                previous_grade
+                previous_grade,
+                inspection_date as graded_inspection_date
             FROM grade_updates
             WHERE update_date >= (NOW() - INTERVAL '14 days')
+              AND inspection_date >= (NOW() - INTERVAL '90 days')
               AND new_grade IS NOT NULL
               AND new_grade IN ('A', 'B', 'C')
             ORDER BY restaurant_camis, update_date DESC
@@ -417,6 +419,7 @@ def get_recent_actions():
         ORDER BY gu.update_date DESC
         LIMIT 200;
     """
+
     # Query for closed/reopened restaurants
     actions_query = """
         WITH latest_inspections AS (
@@ -427,7 +430,7 @@ def get_recent_actions():
         SELECT *
         FROM latest_inspections
         WHERE (action ILIKE '%%closed by dohmh%%' OR action ILIKE '%%re-opened%%')
-          AND inspection_date >= '2022-01-01'
+          AND inspection_date >= (NOW() - INTERVAL '90 days')
         ORDER BY inspection_date DESC;
     """
 
