@@ -375,20 +375,18 @@ def get_recent_actions():
     
     graded_query = """
         WITH recent_grade_updates AS (
-            -- Get restaurants that had a grade finalized in the last 60 days
             SELECT DISTINCT ON (restaurant_camis)
                 restaurant_camis,
                 update_date,
                 update_type,
                 previous_grade
             FROM grade_updates
-            WHERE update_date >= (NOW() - INTERVAL '60 days')
+            WHERE update_date >= (NOW() - INTERVAL '14 days')
               AND new_grade IS NOT NULL
               AND new_grade IN ('A', 'B', 'C')
             ORDER BY restaurant_camis, update_date DESC
         ),
         latest_restaurant_info AS (
-            -- Get the latest inspection record for each restaurant
             SELECT DISTINCT ON (camis) *
             FROM restaurants
             ORDER BY camis, inspection_date DESC
@@ -402,24 +400,10 @@ def get_recent_actions():
             r.zipcode,
             r.phone,
             r.cuisine_description,
-            r.grade,  -- CURRENT grade from restaurants table (matches DOHMH)
+            r.grade,
             r.grade_date,
             r.latitude,
             r.longitude,
-            r.foursquare_fsq_id,
-            r.google_place_id,
-            r.google_rating,
-            r.google_ratings_count,
-            r.google_photo_ref_1,
-            r.google_photo_ref_2,
-            r.price_level,
-            r.hours_mon,
-            r.hours_tue,
-            r.hours_wed,
-            r.hours_thu,
-            r.hours_fri,
-            r.hours_sat,
-            r.hours_sun,
             r.inspection_date,
             r.critical_flag,
             r.inspection_type,
@@ -433,8 +417,6 @@ def get_recent_actions():
         ORDER BY gu.update_date DESC
         LIMIT 200;
     """
-
-
     # Query for closed/reopened restaurants
     actions_query = """
         WITH latest_inspections AS (
