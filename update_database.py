@@ -188,8 +188,9 @@ def update_database_batch(data):
             upsert_sql = """
                 INSERT INTO restaurants (camis, dba, dba_normalized_search, boro, building, street, zipcode, phone, latitude, longitude, grade, inspection_date, critical_flag, inspection_type, cuisine_description, grade_date, action)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
-                ON CONFLICT (camis, inspection_date) DO UPDATE SET dba = EXCLUDED.dba, dba_normalized_search = EXCLUDED.dba_normalized_search, boro = EXCLUDED.boro, building = EXCLUDED.building, street = EXCLUDED.street, zipcode = EXCLUDED.zipcode, phone = EXCLUDED.phone, latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude, grade = EXCLUDED.grade, critical_flag = EXCLUDED.critical_flag, inspection_type = EXCLUDED.inspection_type, cuisine_description = EXCLUDED.cuisine_description, grade_date = EXCLUDED.grade_date, action = EXCLUDED.action;
+                ON CONFLICT (camis, inspection_date) DO UPDATE SET dba = EXCLUDED.dba, dba_normalized_search = EXCLUDED.dba_normalized_search, boro = EXCLUDED.boro, building = EXCLUDED.building, street = EXCLUDED.street, zipcode = EXCLUDED.zipcode, phone = EXCLUDED.phone, latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude, grade = COALESCE(EXCLUDED.grade, restaurants.grade), critical_flag = EXCLUDED.critical_flag, inspection_type = EXCLUDED.inspection_type, cuisine_description = EXCLUDED.cuisine_description, grade_date = COALESCE(EXCLUDED.grade_date, restaurants.grade_date), action = EXCLUDED.action;
             """
+
             cursor.executemany(upsert_sql, restaurants_to_update)
             r_count = cursor.rowcount
         else:
