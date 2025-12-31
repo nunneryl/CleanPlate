@@ -471,27 +471,31 @@ def get_recent_actions():
         logger.error(f"DB query for recent-actions list failed: {e}", exc_info=True)
         return jsonify({"error": "Database query failed"}), 500
 
-@app.route('/users', methods=['POST'])
-def create_user():
-    if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
-    data = request.get_json()
-    token = data.get('identityToken')
-    if not token: return jsonify({"error": "identityToken is required"}), 400
+@app.route('/users', methods=['DELETE'])
+def delete_user():
+    user_id, error_response, status_code = _get_user_id_from_token(request)
+    if error_response: return error_response, status_code
 
-    user_id = verify_apple_token(token)
-    if not user_id:
-        return jsonify({"error": "Invalid token"}), 400
-
-    insert_query = "INSERT INTO users (id) VALUES (%s) ON CONFLICT (id) DO NOTHING;"
     try:
         with DatabaseConnection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(insert_query, (user_id,))
+                # Delete user's favorites
+                cursor.execute("DELETE FROM favorites WHERE user_id = %s;", (user_id,))
+                # Delete user's recent searches
+                cursor.execute("DELETE FROM recent_searches WHERE user_id = %s;", (user_id,))
+                # Delete the user
+                cursor.execute("DELETE FROM users WHERE id = %s;", (user_id,))
             conn.commit()
-        return jsonify({"status": "success", "message": "User created or already exists."}), 201
+        
+        # Clear user's cache
+        cache.delete(f"user_{user_id}_/favorites")
+        
+        logger.info(f"User {user_id} and all associated data have been deleted.")
+        return jsonify({"status": "success", "message": "User deleted successfully."}), 200
     except Exception as e:
-        logger.error(f"Failed to insert user into database: {e}", exc_info=True)
+        logger.error(f"Failed to delete user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
+
 
 @app.route('/favorites', methods=['POST'])
 def add_favorite():
