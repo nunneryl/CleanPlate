@@ -383,7 +383,6 @@ def get_recent_actions():
                 inspection_date as graded_inspection_date
             FROM grade_updates
             WHERE update_date >= (NOW() - INTERVAL '14 days')
-              AND inspection_date >= (NOW() - INTERVAL '90 days')
               AND new_grade IS NOT NULL
               AND new_grade IN ('A', 'B', 'C')
             ORDER BY restaurant_camis, update_date DESC
@@ -410,13 +409,13 @@ def get_recent_actions():
             r.critical_flag,
             r.inspection_type,
             r.action,
-            gu.update_date as sort_date,
+            COALESCE(r.grade_date, r.inspection_date) as sort_date,
             gu.update_type,
             gu.previous_grade
         FROM recent_grade_updates gu
         JOIN latest_restaurant_info r ON gu.restaurant_camis = r.camis
         WHERE r.grade IS NOT NULL AND r.grade IN ('A', 'B', 'C')
-        ORDER BY gu.update_date DESC
+        ORDER BY COALESCE(r.grade_date, r.inspection_date) DESC
         LIMIT 200;
     """
 
@@ -572,6 +571,10 @@ def delete_user():
             with conn.cursor() as cursor:
                 cursor.execute(delete_query, (user_id,))
             conn.commit()
+
+        # Clear the user's cached favorites from Redis to prevent stale data on re-registration
+        cache.delete(f"user_{user_id}_/favorites")
+
         logger.info(f"User {user_id} and all associated data have been deleted.")
         return jsonify({"status": "success", "message": "User deleted successfully."}), 200
     except Exception as e:
