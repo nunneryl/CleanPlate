@@ -409,13 +409,13 @@ def get_recent_actions():
             r.critical_flag,
             r.inspection_type,
             r.action,
-            COALESCE(r.grade_date, r.inspection_date) as sort_date,
+            gu.update_date as sort_date,
             gu.update_type,
             gu.previous_grade
         FROM recent_grade_updates gu
         JOIN latest_restaurant_info r ON gu.restaurant_camis = r.camis
         WHERE r.grade IS NOT NULL AND r.grade IN ('A', 'B', 'C')
-        ORDER BY COALESCE(r.grade_date, r.inspection_date) DESC
+        ORDER BY gu.update_date DESC
         LIMIT 200;
     """
 
