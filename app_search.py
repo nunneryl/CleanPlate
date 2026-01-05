@@ -102,7 +102,14 @@ def _group_and_shape_results(all_rows, ordered_camis):
                 if v_data not in inspections[insp_date_str]['violations']:
                     inspections[insp_date_str]['violations'].append(v_data)
         base_info['inspections'] = sorted(list(inspections.values()), key=lambda x: x['inspection_date'], reverse=True)
-        for key in ['violation_code', 'violation_description', 'grade', 'grade_date', 'action', 'inspection_date', 'critical_flag', 'inspection_type']:
+
+        # Add top-level grade and grade_date from the most recent inspection (for iOS detail view)
+        if base_info['inspections']:
+            most_recent = base_info['inspections'][0]
+            base_info['grade'] = most_recent.get('grade')
+            base_info['grade_date'] = most_recent.get('grade_date')
+
+        for key in ['violation_code', 'violation_description', 'action', 'inspection_date', 'critical_flag', 'inspection_type']:
             base_info.pop(key, None)
         final_results.append(base_info)
     return final_results
