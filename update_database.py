@@ -100,7 +100,7 @@ def update_database_batch(data):
             query = """
                 SELECT r.camis, r.inspection_date, r.grade, r.action, r.critical_flag
                 FROM unnest(%s::varchar[], %s::date[]) AS t(camis, inspection_date)
-                JOIN restaurants r ON r.camis = t.camis AND CAST(r.inspection_date AS DATE) = t.inspection_date;
+                JOIN restaurants r ON r.camis = t.camis AND r.inspection_date::date = t.inspection_date;
             """
             cursor.execute(query, (camis_list, dates_list))
             existing_records_raw = cursor.fetchall()
