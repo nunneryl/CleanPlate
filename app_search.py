@@ -102,7 +102,14 @@ def _group_and_shape_results(all_rows, ordered_camis):
                 if v_data not in inspections[insp_date_str]['violations']:
                     inspections[insp_date_str]['violations'].append(v_data)
         base_info['inspections'] = sorted(list(inspections.values()), key=lambda x: x['inspection_date'], reverse=True)
-        for key in ['violation_code', 'violation_description', 'grade', 'grade_date', 'action', 'inspection_date', 'critical_flag', 'inspection_type']:
+
+        # Add top-level grade and grade_date from the most recent inspection (for iOS detail view)
+        if base_info['inspections']:
+            most_recent = base_info['inspections'][0]
+            base_info['grade'] = most_recent.get('grade')
+            base_info['grade_date'] = most_recent.get('grade_date')
+
+        for key in ['violation_code', 'violation_description', 'action', 'inspection_date', 'critical_flag', 'inspection_type']:
             base_info.pop(key, None)
         final_results.append(base_info)
     return final_results
@@ -383,7 +390,6 @@ def get_recent_actions():
                 inspection_date as graded_inspection_date
             FROM grade_updates
             WHERE update_date >= (NOW() - INTERVAL '14 days')
-              AND inspection_date >= (NOW() - INTERVAL '90 days')
               AND new_grade IS NOT NULL
               AND new_grade IN ('A', 'B', 'C')
             ORDER BY restaurant_camis, update_date DESC
@@ -572,6 +578,10 @@ def delete_user():
             with conn.cursor() as cursor:
                 cursor.execute(delete_query, (user_id,))
             conn.commit()
+
+        # Clear the user's cached favorites from Redis to prevent stale data on re-registration
+        cache.delete(f"user_{user_id}_/favorites")
+
         logger.info(f"User {user_id} and all associated data have been deleted.")
         return jsonify({"status": "success", "message": "User deleted successfully."}), 200
     except Exception as e:
