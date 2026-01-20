@@ -422,7 +422,7 @@ def get_recent_actions():
           AND r.grade IN ('A', 'B', 'C')
           AND r.grade_date >= (NOW() - INTERVAL '60 days')
         ORDER BY r.grade_date DESC
-        LIMIT 200;
+        LIMIT 500;
     """
 
     # Query for closed/reopened restaurants
