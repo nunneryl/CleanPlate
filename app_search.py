@@ -381,16 +381,13 @@ def get_recent_actions():
     action_results = []
     
     graded_query = """
-        WITH recent_grade_updates AS (
+        WITH grade_transitions AS (
             SELECT DISTINCT ON (restaurant_camis)
                 restaurant_camis,
-                update_date,
                 update_type,
-                previous_grade,
-                inspection_date as graded_inspection_date
+                previous_grade
             FROM grade_updates
-            WHERE update_date >= (NOW() - INTERVAL '14 days')
-              AND new_grade IS NOT NULL
+            WHERE new_grade IS NOT NULL
               AND new_grade IN ('A', 'B', 'C')
             ORDER BY restaurant_camis, update_date DESC
         ),
@@ -416,13 +413,15 @@ def get_recent_actions():
             r.critical_flag,
             r.inspection_type,
             r.action,
-            gu.update_date as sort_date,
-            gu.update_type,
-            gu.previous_grade
-        FROM recent_grade_updates gu
-        JOIN latest_restaurant_info r ON gu.restaurant_camis = r.camis
-        WHERE r.grade IS NOT NULL AND r.grade IN ('A', 'B', 'C')
-        ORDER BY gu.update_date DESC
+            r.grade_date as sort_date,
+            gt.update_type,
+            gt.previous_grade
+        FROM grade_transitions gt
+        JOIN latest_restaurant_info r ON gt.restaurant_camis = r.camis
+        WHERE r.grade IS NOT NULL
+          AND r.grade IN ('A', 'B', 'C')
+          AND r.grade_date >= (NOW() - INTERVAL '60 days')
+        ORDER BY r.grade_date DESC
         LIMIT 200;
     """
 
