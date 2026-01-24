@@ -92,6 +92,7 @@ def _group_and_shape_results(all_rows, ordered_camis):
                     'inspection_date': insp_date_str,
                     'grade': row.get('grade'),
                     'grade_date': row['grade_date'].isoformat() if row.get('grade_date') else None,
+                    'score': row.get('score'),
                     'critical_flag': row.get('critical_flag'),
                     'inspection_type': row.get('inspection_type'),
                     'action': row.get('action'),
@@ -121,6 +122,7 @@ def _shape_simple_restaurant_list(rows):
             'inspection_date': row.get('inspection_date').isoformat() if row.get('inspection_date') else None,
             'critical_flag': row.get('critical_flag'),
             'grade': row.get('grade'),
+            'score': row.get('score'),
             'inspection_type': row.get('inspection_type'),
             'action': row.get('action'),
             'violations': []
