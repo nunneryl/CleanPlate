@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS restaurants (
     cuisine_description VARCHAR,
     grade TEXT,
     grade_date TIMESTAMP WITHOUT TIME ZONE,
+    score INTEGER,
     violation_code VARCHAR,
     violation_description TEXT,
     inspection_type VARCHAR,

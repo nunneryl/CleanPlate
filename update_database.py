@@ -38,6 +38,14 @@ def _to_float_or_none(value_str):
             return None
     return None
 
+def _to_int_or_none(value_str):
+    if value_str and value_str not in [NOT_APPLICABLE, '']:
+        try:
+            return int(value_str)
+        except (ValueError, TypeError):
+            return None
+    return None
+
 def convert_date(date_str):
     if not date_str or not isinstance(date_str, str): return None
     try:
@@ -181,7 +189,8 @@ def update_database_batch(data):
                     _to_float_or_none(details_item.get("latitude")), _to_float_or_none(details_item.get("longitude")),
                     details_item.get("grade"), inspection_date, critical_flag_for_inspection,
                     details_item.get("inspection_type"), details_item.get("cuisine_description"),
-                    convert_date(details_item.get("grade_date")), details_item.get("action")
+                    convert_date(details_item.get("grade_date")), details_item.get("action"),
+                    _to_int_or_none(details_item.get("score"))
                 ))
 
             for v_code, v_desc in inspection["violations"]:
@@ -191,9 +200,9 @@ def update_database_batch(data):
         if restaurants_to_update:
             logger.info(f"Found {len(restaurants_to_update)} restaurants that are new or have changed. Updating now...")
             upsert_sql = """
-                INSERT INTO restaurants (camis, dba, dba_normalized_search, boro, building, street, zipcode, phone, latitude, longitude, grade, inspection_date, critical_flag, inspection_type, cuisine_description, grade_date, action)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
-                ON CONFLICT (camis, inspection_date) DO UPDATE SET dba = EXCLUDED.dba, dba_normalized_search = EXCLUDED.dba_normalized_search, boro = EXCLUDED.boro, building = EXCLUDED.building, street = EXCLUDED.street, zipcode = EXCLUDED.zipcode, phone = EXCLUDED.phone, latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude, grade = COALESCE(EXCLUDED.grade, restaurants.grade), critical_flag = EXCLUDED.critical_flag, inspection_type = EXCLUDED.inspection_type, cuisine_description = EXCLUDED.cuisine_description, grade_date = COALESCE(EXCLUDED.grade_date, restaurants.grade_date), action = EXCLUDED.action;
+                INSERT INTO restaurants (camis, dba, dba_normalized_search, boro, building, street, zipcode, phone, latitude, longitude, grade, inspection_date, critical_flag, inspection_type, cuisine_description, grade_date, action, score)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (camis, inspection_date) DO UPDATE SET dba = EXCLUDED.dba, dba_normalized_search = EXCLUDED.dba_normalized_search, boro = EXCLUDED.boro, building = EXCLUDED.building, street = EXCLUDED.street, zipcode = EXCLUDED.zipcode, phone = EXCLUDED.phone, latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude, grade = COALESCE(EXCLUDED.grade, restaurants.grade), critical_flag = EXCLUDED.critical_flag, inspection_type = EXCLUDED.inspection_type, cuisine_description = EXCLUDED.cuisine_description, grade_date = COALESCE(EXCLUDED.grade_date, restaurants.grade_date), action = EXCLUDED.action, score = EXCLUDED.score;
             """
 
             cursor.executemany(upsert_sql, restaurants_to_update)
