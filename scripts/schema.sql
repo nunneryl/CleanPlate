@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS restaurants (
     hours JSONB,
     google_maps_url TEXT,
     price_level TEXT,
+    dine_in BOOLEAN,
+    takeout BOOLEAN,
+    delivery BOOLEAN,
     google_id_last_checked TIMESTAMP WITH TIME ZONE,
     enrichment_last_attempted TIMESTAMP WITH TIME ZONE,
     PRIMARY KEY (camis, inspection_date)

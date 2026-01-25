@@ -47,7 +47,7 @@ class GoogleProvider:
             return None, "Missing place_id"
 
         # Define the fields we want to retrieve
-        fields = "id,displayName,rating,userRatingCount,websiteUri,regularOpeningHours,priceLevel"
+        fields = "id,displayName,rating,userRatingCount,websiteUri,regularOpeningHours,priceLevel,dineIn,takeout,delivery"
         
         headers = {
             'X-Goog-Api-Key': self.api_key,
