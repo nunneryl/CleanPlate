@@ -22,7 +22,7 @@ def fetch_restaurants_needing_service_options(conn, limit=500):
         SELECT DISTINCT ON (camis) camis, google_place_id
         FROM restaurants
         WHERE google_place_id IS NOT NULL
-        AND dine_in IS NULL
+        AND (dine_in IS NULL OR takeout IS NULL OR delivery IS NULL)
         ORDER BY camis
         LIMIT %s;
     """
