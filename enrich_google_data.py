@@ -66,9 +66,10 @@ def update_restaurant_in_db(conn, camis, details):
         website = details.get('websiteUri')
         hours = json.dumps(details.get('regularOpeningHours'))
         price_level = details.get('priceLevel')
-        dine_in = details.get('dineIn')
-        takeout = details.get('takeout')
-        delivery = details.get('delivery')
+        # Default to False if Google doesn't return these fields
+        dine_in = details.get('dineIn', False)
+        takeout = details.get('takeout', False)
+        delivery = details.get('delivery', False)
 
         with conn.cursor() as cursor:
             cursor.execute(update_sql, (rating, review_count, website, hours, price_level, dine_in, takeout, delivery, camis))

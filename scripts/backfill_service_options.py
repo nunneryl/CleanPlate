@@ -83,9 +83,11 @@ def main():
                 details, error = google.get_place_details(place_id)
 
                 if details and not error:
-                    dine_in = details.get('dineIn')
-                    takeout = details.get('takeout')
-                    delivery = details.get('delivery')
+                    # Default to False if Google doesn't return these fields
+                    # This distinguishes "processed, no data" (False) from "not processed" (NULL)
+                    dine_in = details.get('dineIn', False)
+                    takeout = details.get('takeout', False)
+                    delivery = details.get('delivery', False)
 
                     if update_service_options(conn, camis, dine_in, takeout, delivery):
                         total_updated += 1
