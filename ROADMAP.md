@@ -1,7 +1,17 @@
 # CleanPlate Development Roadmap
 
-> **Last Updated:** January 2, 2026
+> **Last Updated:** February 6, 2026
 > **Status:** Active Development
+> **Current Version:** 2.13.0
+
+---
+
+## Repositories
+
+| Repo | Purpose |
+|------|---------|
+| `CleanPlate` (this repo) | Backend API, database, cron jobs |
+| `nunneryl/CleanPlate-IOS` | iOS SwiftUI app |
 
 ---
 
@@ -17,82 +27,45 @@
 
 ---
 
-## 🔴 P0: CRITICAL BUG FIXES
+## ✅ COMPLETED
 
-### 1. Account Deletion Cache Bug
-**Status:** 🐛 Bug Confirmed
-**Impact:** Users see old favorites after deleting and recreating account
-**Root Cause:** Redis cache not cleared on account deletion
+### P0 Bugs - All Fixed
 
-**File:** `app_search.py` (lines 564-579)
+| # | Issue | Status | Location |
+|---|-------|--------|----------|
+| 1 | Account Deletion Cache Bug | ✅ Fixed | `app_search.py:584` - `cache.delete(f"user_{user_id}_/favorites")` |
+| 2 | Grade Updates Sorting Bug | ✅ Fixed | `app_search.py:426` - `ORDER BY r.grade_date DESC` |
+| 3 | "Grade Pending" in Recently Graded Filters | ✅ Fixed | iOS `RecentlyGradedListView.swift` - `.filter { $0 != .pending }` |
 
-**Current Code:**
-```python
-@app.route('/users', methods=['DELETE'])
-def delete_user():
-    # ... validation ...
-    delete_query = "DELETE FROM users WHERE id = %s;"
-    # ... execute ...
-    conn.commit()
-    # ❌ MISSING: cache.delete(f"user_{user_id}_/favorites")
-```
+### P1 Items - Fixed
 
-**Fix:** Add after `conn.commit()`:
-```python
-cache.delete(f"user_{user_id}_/favorites")
-```
+| # | Issue | Status | Details |
+|---|-------|--------|---------|
+| 5 | CAST Preventing Index Usage | ✅ Fixed | `update_database.py:111` uses `::date` syntax |
+| 6 | Map Integration Reliability | ✅ Fixed | iOS `MapServices.swift` has 500m verification + fallback logic |
 
-**Effort:** 5 minutes
+### P2 Items - Fixed
 
----
+| # | Issue | Status | Details |
+|---|-------|--------|---------|
+| 9 | Error Recovery & Retry Logic | ✅ Fixed | iOS `APIService.swift` has exponential backoff (2^n seconds, 3 attempts) |
 
-### 2. Grade Updates Sorting Bug
-**Status:** 🐛 Bug Confirmed
-**Impact:** Recently graded restaurants appear in wrong order; some missed entirely
-**Root Cause:** Sorting by `update_date` (internal metadata) instead of `grade_date` (official date)
+### P4 Items - Partially Complete
 
-**File:** `app_search.py` (lines 376-420)
-
-**Issues:**
-1. `ORDER BY gu.update_date DESC` should be `ORDER BY COALESCE(r.grade_date, r.inspection_date) DESC`
-2. Date filter excludes old inspections with recent grade finalizations
-
-**Current:**
-```sql
-WHERE update_date >= (NOW() - INTERVAL '14 days')
-  AND inspection_date >= (NOW() - INTERVAL '90 days')
-```
-
-**Fix:**
-```sql
-WHERE update_date >= (NOW() - INTERVAL '14 days')
-  AND (inspection_date >= (NOW() - INTERVAL '90 days')
-       OR grade_date >= (NOW() - INTERVAL '14 days'))
-ORDER BY COALESCE(r.grade_date, r.inspection_date) DESC
-```
-
-**Effort:** 30 minutes
-
----
-
-### 3. Remove "Grade Pending" from Recently Graded Filters
-**Status:** 🐛 UX Bug
-**Impact:** Confusing filter option - "Grade Pending" in a list of graded restaurants
-**Location:** iOS `RecentlyGradedListView.swift` filter options
-
-**Fix:** Remove "Pending" option from grade filter picker in the Recently Graded view
-
-**Effort:** 10 minutes
+| # | Issue | Status | Details |
+|---|-------|--------|---------|
+| 16 | Google Data Integration | ✅ Partial | iOS displays ratings, hours, price level, website. Data exists in DB from prior $200 API spend. |
 
 ---
 
 ## 🟠 P1: HIGH PRIORITY - Performance & Reliability
 
 ### 4. Missing Database Indexes (Critical Performance)
-**Status:** ⚡ Performance Issue
+**Status:** ⏳ Not Yet Applied
 **Impact:** 3-10x slower queries on main endpoints
 
-**Run these SQL statements immediately:**
+The following indexes are recommended but NOT in `schema.sql`:
+
 ```sql
 -- CRITICAL: Violations join (80-90% faster searches)
 CREATE INDEX IF NOT EXISTS idx_violations_camis_inspection_date
@@ -115,67 +88,26 @@ CREATE INDEX IF NOT EXISTS idx_restaurants_camis_inspection_date_desc
 ON restaurants (camis, inspection_date DESC);
 ```
 
-**Effort:** 15 minutes to run, immediate improvement
-
----
-
-### 5. Fix CAST Preventing Index Usage
-**Status:** ⚡ Performance Issue
-**File:** `update_database.py` (line 103)
-
-**Current:**
-```sql
-AND CAST(r.inspection_date AS DATE) = t.inspection_date
-```
-
-**Fix:**
-```sql
-AND r.inspection_date::date = t.inspection_date
-```
-
-**Effort:** 5 minutes
-
----
-
-### 6. Map Integration Reliability
-**Status:** ⚠️ Reliability Issue
-**Impact:** Silent failures when Apple Maps can't find restaurant; no fallback
-
-**Issues Identified:**
-- No fallback cascade between Apple Maps → Google Maps
-- Silent failures with no user feedback
-- Google Maps button hidden if `google_place_id` is null
-- No coordinate verification
-
-**Files to Update:**
-- `MapServices.swift` - Add fallback search strategies
-- `RestaurantDetailViewModel.swift` - Add dual-source search
-- `RestaurantDetailView.swift` - Show both map options when available
-
-**Recommended Approach:**
-1. Search Apple Maps AND check for Google Place ID in parallel
-2. If Apple fails but Google ID exists, offer Google as alternative
-3. Show clear error messages with recovery options
-4. Verify returned coordinates are within ~1000ft of API coordinates
-
-**Effort:** 2-3 hours
+**Effort:** 15 minutes to run in Railway PostgreSQL console
 
 ---
 
 ### 7. Apple Token Refresh Mechanism
-**Status:** ⚠️ Reliability Issue
-**Impact:** Users may get logged out unexpectedly when token expires
+**Status:** ⚠️ Still Needed
+**Impact:** Users forced to re-authenticate when token expires (~24 hours)
 
-**Current:** No token refresh; users must re-authenticate when token expires
+**Current Behavior:**
+- Token stored in Keychain
+- On 401 response, user must manually re-authenticate with Apple
 
-**Fix Options:**
-1. **Quick:** Detect 401 responses, prompt re-auth with Apple
-2. **Better:** Implement silent refresh using Apple's refresh token flow
-3. **Best:** Store refresh token in Keychain, auto-refresh before expiry
+**Recommended Fix:**
+1. Detect 401 in `APIService.swift`
+2. Trigger Apple Sign-In re-auth silently or with minimal UI
+3. Retry the failed request with new token
 
 **Files:**
-- `AuthenticationManager.swift` - Add refresh logic
-- `APIService.swift` - Add 401 retry with refresh
+- `AuthenticationManager.swift` - Add refresh/re-auth logic
+- `APIService.swift` - Add 401 interception with retry
 
 **Effort:** 2-4 hours
 
@@ -184,7 +116,7 @@ AND r.inspection_date::date = t.inspection_date
 ## 🟡 P2: MEDIUM PRIORITY - User Experience
 
 ### 8. Offline Mode / Local Database
-**Status:** 🆕 New Feature
+**Status:** 🆕 Not Started
 **Impact:** App unusable without network; favorites not cached locally
 
 **Implementation:**
@@ -204,38 +136,19 @@ AND r.inspection_date::date = t.inspection_date
 
 ---
 
-### 9. Error Recovery & Retry Logic
-**Status:** 🆕 Enhancement
-**Impact:** Better UX when network is flaky
-
-**Current:** Basic retry on 5xx errors
-**Needed:**
-- Granular retry for different error types
-- User-initiated retry buttons
-- Exponential backoff with jitter
-- Offline queue for favorites/searches
-
-**Files:**
-- `APIService.swift` - Enhanced retry logic
-- All ViewModels - Add retry actions
-
-**Effort:** 4-6 hours
-
----
-
 ### 10. Deep Linking / Universal Links
-**Status:** 🆕 New Feature
+**Status:** 🆕 Not Started
 **Impact:** Can't share restaurant links that open in app
 
 **Implementation:**
-1. Configure Apple App Site Association file
-2. Add URL handling in `CleanPlateApp.swift`
+1. Configure Apple App Site Association file on backend
+2. Add URL handling in `NYCFoodRatingsApp.swift`
 3. Create shareable URLs: `cleanplate.app/restaurant/{camis}`
 4. Handle incoming links and navigate to detail view
 
 **Files:**
 - `apple-app-site-association` (new, hosted on backend)
-- `CleanPlateApp.swift` - Add `.onOpenURL` handler
+- `NYCFoodRatingsApp.swift` - Add `.onOpenURL` handler
 - Backend: Add redirect endpoint
 
 **Effort:** 4-6 hours
@@ -244,9 +157,9 @@ AND r.inspection_date::date = t.inspection_date
 
 ### 11. N+1 Query Fix in Backfill Script
 **Status:** ⚡ Performance Issue
-**File:** `backfill_grade_updates.py` (lines 33-40)
+**File:** `backfill_grade_updates.py`
 
-**Current:** Loops through 50K+ restaurants with individual queries
+**Current:** Loops through restaurants with individual queries
 
 **Fix:** Single query with window function:
 ```sql
@@ -267,16 +180,16 @@ WHERE prev_grade IN ('P', 'Z', 'N') AND grade IN ('A', 'B', 'C')
 ## 🟢 P3: LOW PRIORITY - Enhancements
 
 ### 12. Frontend Defensive Sorting
-**Status:** 🛡️ Defensive Code
+**Status:** 🛡️ Optional
 **Impact:** Ensures correct display even if backend sends unsorted data
 
-**File:** `RecentlyGradedListViewModel.swift` (line 61)
+**File:** `RecentlyGradedListViewModel.swift`
 
 **Add:**
 ```swift
 self.recentActivity = actionResults.recently_graded.sorted { r1, r2 in
-    let date1 = r1.finalized_date ?? r1.grade_date ?? "0000-00-00"
-    let date2 = r2.finalized_date ?? r2.grade_date ?? "0000-00-00"
+    let date1 = r1.grade_date ?? "0000-00-00"
+    let date2 = r2.grade_date ?? "0000-00-00"
     return date1 > date2
 }
 ```
@@ -285,16 +198,22 @@ self.recentActivity = actionResults.recently_graded.sorted { r1, r2 in
 
 ---
 
-### 13. Schema Cleanup - Remove Duplicate Violation Columns
+### 13. Schema Cleanup - Remove Deprecated Columns
 **Status:** 🧹 Tech Debt
 **Impact:** Cleaner schema, less confusion
 
-**Issue:** Both `restaurants.violation_code/description` AND `violations` table store violations
+**Issues:**
+1. `restaurants.violation_code/description` duplicates `violations` table
+2. `dine_in`, `takeout`, `delivery` columns are unused (feature cancelled)
 
 **Fix:**
-1. Verify all code uses `violations` table
-2. Drop redundant columns from `restaurants` table
-3. Update any queries still using old columns
+1. Verify all code uses `violations` table only
+2. Drop redundant columns from `restaurants` table:
+   - `violation_code`
+   - `violation_description`
+   - `dine_in`
+   - `takeout`
+   - `delivery`
 
 **Effort:** 1-2 hours (requires careful testing)
 
@@ -310,13 +229,13 @@ self.recentActivity = actionResults.recently_graded.sorted { r1, r2 in
 -- grade_updates.restaurant_camis should reference restaurants (or keep loose for audit)
 ```
 
+**Note:** May require data cleanup first if orphaned records exist.
+
 **Effort:** 30 minutes
 
 ---
 
 ## 🔵 P4: FUTURE PHASES
-
----
 
 ### Phase 3: Core Feature Enrichment
 
@@ -324,7 +243,8 @@ self.recentActivity = actionResults.recently_graded.sorted { r1, r2 in
 **Status:** 📋 Planned
 **Goal:** Organize detail screen into tabbed interface
 
-**New Structure:**
+**Current:** Single scrolling view with all data
+**Proposed:**
 ```
 RestaurantDetailView
 ├── Tab 1: "Health Report"
@@ -344,27 +264,6 @@ RestaurantDetailView
 - New: `CommunityInfoTabView.swift`
 
 **Effort:** 1-2 days
-
----
-
-#### 16. Google Maps Data Integration (Full)
-**Status:** 📋 Planned
-**Goal:** Enrich app with Google ratings, hours, website
-
-**Backend Tasks:**
-1. ✅ Schema columns already exist (`google_rating`, `hours`, `website`, etc.)
-2. Run Apify Google Maps Scraper for full dataset
-3. Import data via `import_apify_data.py`
-4. Update `/restaurant/<camis>` endpoint to return Google data
-
-**Frontend Tasks:**
-1. Update `Restaurant` model if needed
-2. Build "Community Info" tab UI
-3. Display ratings with star icons
-4. Format hours in user-friendly way
-5. Add "View on Google Maps" deep link
-
-**Effort:** 2-3 days total
 
 ---
 
@@ -433,45 +332,33 @@ RestaurantDetailView
 
 ---
 
-## Summary: Implementation Order
+## Summary: Current Priorities
 
-### Week 1: Critical Fixes
-| # | Task | Priority | Effort |
-|---|------|----------|--------|
-| 1 | Account deletion cache bug | 🔴 P0 | 5 min |
-| 2 | Grade updates sorting bug | 🔴 P0 | 30 min |
-| 3 | Remove pending from filters | 🔴 P0 | 10 min |
-| 4 | Add database indexes | 🟠 P1 | 15 min |
-| 5 | Fix CAST in update script | 🟠 P1 | 5 min |
+### Immediate (This Week)
+| # | Task | Priority | Effort | Type |
+|---|------|----------|--------|------|
+| 4 | Add database indexes | 🟠 P1 | 15 min | Backend SQL |
+| 7 | Token refresh mechanism | 🟠 P1 | 2-4 hrs | iOS |
 
-### Week 2: Reliability
-| # | Task | Priority | Effort |
-|---|------|----------|--------|
-| 6 | Map integration reliability | 🟠 P1 | 2-3 hrs |
-| 7 | Token refresh mechanism | 🟠 P1 | 2-4 hrs |
-| 11 | N+1 query fix | 🟡 P2 | 30 min |
-| 12 | Frontend defensive sorting | 🟢 P3 | 15 min |
+### Short-Term (Next 2 Weeks)
+| # | Task | Priority | Effort | Type |
+|---|------|----------|--------|------|
+| 11 | N+1 query fix | 🟡 P2 | 30 min | Backend |
+| 12 | Frontend defensive sorting | 🟢 P3 | 15 min | iOS |
+| 10 | Deep linking | 🟡 P2 | 4-6 hrs | Both |
 
-### Week 3-4: User Experience
-| # | Task | Priority | Effort |
-|---|------|----------|--------|
-| 8 | Offline mode / Core Data | 🟡 P2 | 1-2 days |
-| 9 | Error recovery / retry | 🟡 P2 | 4-6 hrs |
-| 10 | Deep linking | 🟡 P2 | 4-6 hrs |
+### Medium-Term (This Month)
+| # | Task | Priority | Effort | Type |
+|---|------|----------|--------|------|
+| 8 | Offline mode / Core Data | 🟡 P2 | 1-2 days | iOS |
+| 13 | Schema cleanup | 🟢 P3 | 1-2 hrs | Backend |
 
-### Month 2: Feature Enrichment
-| # | Task | Priority | Effort |
-|---|------|----------|--------|
-| 15 | Detail dashboard redesign | 🔵 P4 | 1-2 days |
-| 16 | Google Maps data integration | 🔵 P4 | 2-3 days |
-
-### Month 3+: Retention & Growth
-| # | Task | Priority | Effort |
-|---|------|----------|--------|
-| 17 | Push notifications | 🔵 P4 | 3-5 days |
-| 18 | OpenTable affiliate | 🔵 P4 | 1-2 days |
-| 19 | Interactive map | 🔮 Future | 1-2 weeks |
-| 20 | Android app | 🔮 Future | 2-3 months |
+### Future (Next Quarter)
+| # | Task | Priority | Effort | Type |
+|---|------|----------|--------|------|
+| 15 | Detail dashboard redesign | 🔵 P4 | 1-2 days | iOS |
+| 17 | Push notifications | 🔵 P4 | 3-5 days | Both |
+| 18 | OpenTable affiliate | 🔵 P4 | 1-2 days | iOS |
 
 ---
 
@@ -502,19 +389,54 @@ ON restaurants (camis, inspection_date DESC);
 
 ## Files Quick Reference
 
-### Backend Critical Files
-| File | Lines | Key Functions |
-|------|-------|---------------|
-| `app_search.py` | 763 | All API endpoints |
-| `update_database.py` | 246 | NYC data sync |
-| `scripts/schema.sql` | - | Database schema |
+### Backend Critical Files (this repo)
+| File | Purpose |
+|------|---------|
+| `app_search.py` | All API endpoints (14 total) |
+| `update_database.py` | Daily NYC data sync |
+| `backfill.py` | Weekly Foursquare/Google matching |
+| `enrich_google_data.py` | Google Places enrichment |
+| `scripts/schema.sql` | Database schema |
+| `config.py` | Environment configuration |
 
-### iOS Critical Files
-| File | Lines | Key Functions |
-|------|-------|---------------|
-| `APIService.swift` | 368 | Networking |
-| `AuthenticationManager.swift` | 216 | Auth + state |
-| `SearchViewModel.swift` | 232 | Search logic |
-| `RecentlyGradedListViewModel.swift` | 72 | Grade updates |
-| `RestaurantDetailView.swift` | - | Detail screen |
-| `MapServices.swift` | - | Map integration |
+### iOS Critical Files (`nunneryl/CleanPlate-IOS`)
+| File | Purpose |
+|------|---------|
+| `Services/APIService.swift` | Networking, SSL pinning, retry logic |
+| `Services/AuthenticationManager.swift` | Apple Sign-In, token storage |
+| `Services/MapServices.swift` | Map integration with verification |
+| `Features/Search/SearchViewModel.swift` | Search, filters, pagination |
+| `Features/RecentlyGraded/RecentlyGradedListViewModel.swift` | Grade updates feed |
+| `Features/RestaurantDetail/RestaurantDetailView.swift` | Detail screen |
+| `Models/Models.swift` | Data models (Restaurant, Inspection, etc.) |
+| `Models/FilterOptions.swift` | Filter enums (Grade, Boro, Cuisine, Sort) |
+
+---
+
+## Architecture Overview
+
+### Backend Stack
+- **Framework:** Flask + Gunicorn
+- **Database:** PostgreSQL (Railway)
+- **Cache:** Redis (1-hour TTL)
+- **Auth:** Apple Sign-In JWT verification
+- **Cron:** GitHub Actions (daily NYC sync, weekly backfill)
+
+### iOS Stack
+- **UI:** SwiftUI
+- **Architecture:** MVVM
+- **Auth:** Apple Sign-In with Keychain storage
+- **Networking:** URLSession with SSL pinning
+- **Analytics:** Firebase
+- **Security:** Certificate pinning, input validation
+
+### Data Flow
+```
+NYC Open Data API → Daily Sync → PostgreSQL
+                                    ↓
+Foursquare/Google → Weekly Backfill → Enrichment Data
+                                    ↓
+                              Flask API
+                                    ↓
+                           iOS App (SwiftUI)
+```
