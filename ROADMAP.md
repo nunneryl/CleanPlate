@@ -19,70 +19,23 @@
 
 ## 🔴 P0: CRITICAL BUG FIXES
 
-### 1. Account Deletion Cache Bug
-**Status:** 🐛 Bug Confirmed
+### 1. ~~Account Deletion Cache Bug~~
+**Status:** ✅ Completed
 **Impact:** Users see old favorites after deleting and recreating account
-**Root Cause:** Redis cache not cleared on account deletion
-
-**File:** `app_search.py` (lines 564-579)
-
-**Current Code:**
-```python
-@app.route('/users', methods=['DELETE'])
-def delete_user():
-    # ... validation ...
-    delete_query = "DELETE FROM users WHERE id = %s;"
-    # ... execute ...
-    conn.commit()
-    # ❌ MISSING: cache.delete(f"user_{user_id}_/favorites")
-```
-
-**Fix:** Add after `conn.commit()`:
-```python
-cache.delete(f"user_{user_id}_/favorites")
-```
-
-**Effort:** 5 minutes
+**Root Cause:** Redis cache not cleared on account deletion — fixed by adding `cache.delete()` after account deletion.
 
 ---
 
-### 2. Grade Updates Sorting Bug
-**Status:** 🐛 Bug Confirmed
+### 2. ~~Grade Updates Sorting Bug~~
+**Status:** ✅ Completed
 **Impact:** Recently graded restaurants appear in wrong order; some missed entirely
-**Root Cause:** Sorting by `update_date` (internal metadata) instead of `grade_date` (official date)
-
-**File:** `app_search.py` (lines 376-420)
-
-**Issues:**
-1. `ORDER BY gu.update_date DESC` should be `ORDER BY COALESCE(r.grade_date, r.inspection_date) DESC`
-2. Date filter excludes old inspections with recent grade finalizations
-
-**Current:**
-```sql
-WHERE update_date >= (NOW() - INTERVAL '14 days')
-  AND inspection_date >= (NOW() - INTERVAL '90 days')
-```
-
-**Fix:**
-```sql
-WHERE update_date >= (NOW() - INTERVAL '14 days')
-  AND (inspection_date >= (NOW() - INTERVAL '90 days')
-       OR grade_date >= (NOW() - INTERVAL '14 days'))
-ORDER BY COALESCE(r.grade_date, r.inspection_date) DESC
-```
-
-**Effort:** 30 minutes
+**Root Cause:** Sorting by `update_date` instead of `grade_date` — fixed with `COALESCE` ordering and expanded date filter.
 
 ---
 
-### 3. Remove "Grade Pending" from Recently Graded Filters
-**Status:** 🐛 UX Bug
-**Impact:** Confusing filter option - "Grade Pending" in a list of graded restaurants
-**Location:** iOS `RecentlyGradedListView.swift` filter options
-
-**Fix:** Remove "Pending" option from grade filter picker in the Recently Graded view
-
-**Effort:** 10 minutes
+### 3. ~~Remove "Grade Pending" from Recently Graded Filters~~
+**Status:** ✅ Completed
+**Impact:** Confusing filter option — removed "Pending" from grade filter in Recently Graded view.
 
 ---
 
@@ -419,10 +372,10 @@ RestaurantDetailView
 ### Week 1: Critical Fixes
 | # | Task | Priority | Effort |
 |---|------|----------|--------|
-| 1 | Account deletion cache bug | 🔴 P0 | 5 min |
-| 2 | Grade updates sorting bug | 🔴 P0 | 30 min |
-| 3 | Remove pending from filters | 🔴 P0 | 10 min |
-| 4 | Add database indexes | 🟠 P1 | 15 min |
+| 1 | ~~Account deletion cache bug~~ | 🔴 P0 | ✅ Done |
+| 2 | ~~Grade updates sorting bug~~ | 🔴 P0 | ✅ Done |
+| 3 | ~~Remove pending from filters~~ | 🔴 P0 | ✅ Done |
+| 4 | ~~Add database indexes~~ | 🟠 P1 | ✅ Done |
 | 5 | Fix CAST in update script | 🟠 P1 | 5 min |
 
 ### Week 2: Reliability
