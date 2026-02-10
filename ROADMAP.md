@@ -1,6 +1,6 @@
 # CleanPlate Development Roadmap
 
-> **Last Updated:** January 2, 2026
+> **Last Updated:** February 10, 2026
 > **Status:** Active Development
 
 ---
@@ -88,34 +88,11 @@ ORDER BY COALESCE(r.grade_date, r.inspection_date) DESC
 
 ## 🟠 P1: HIGH PRIORITY - Performance & Reliability
 
-### 4. Missing Database Indexes (Critical Performance)
-**Status:** ⚡ Performance Issue
+### 4. ~~Missing Database Indexes (Critical Performance)~~
+**Status:** ✅ Completed (February 2026)
 **Impact:** 3-10x slower queries on main endpoints
 
-**Run these SQL statements immediately:**
-```sql
--- CRITICAL: Violations join (80-90% faster searches)
-CREATE INDEX IF NOT EXISTS idx_violations_camis_inspection_date
-ON violations (camis, inspection_date);
-
--- HIGH: Action column filtering (60-70% faster recent-actions)
-CREATE INDEX IF NOT EXISTS idx_restaurants_action
-ON restaurants (action);
-
--- HIGH: Grade updates time filtering (40-50% faster)
-CREATE INDEX IF NOT EXISTS idx_grade_updates_dates
-ON grade_updates (update_date DESC, inspection_date DESC);
-
--- MEDIUM: Violation pruning
-CREATE INDEX IF NOT EXISTS idx_violations_inspection_date
-ON violations (inspection_date);
-
--- OPTIONAL: Optimize DISTINCT ON queries
-CREATE INDEX IF NOT EXISTS idx_restaurants_camis_inspection_date_desc
-ON restaurants (camis, inspection_date DESC);
-```
-
-**Effort:** 15 minutes to run, immediate improvement
+Added indexes for cuisine, boro, location, and grade lookups in Railway PostgreSQL. Removed unused indexes to save ~30MB.
 
 ---
 
@@ -162,22 +139,16 @@ AND r.inspection_date::date = t.inspection_date
 
 ---
 
-### 7. Apple Token Refresh Mechanism
-**Status:** ⚠️ Reliability Issue
-**Impact:** Users may get logged out unexpectedly when token expires
+### 7. ~~Apple Token Refresh Mechanism~~
+**Status:** ✅ Completed (February 2026)
+**Impact:** Users no longer get logged out when Apple identity token expires
 
-**Current:** No token refresh; users must re-authenticate when token expires
-
-**Fix Options:**
-1. **Quick:** Detect 401 responses, prompt re-auth with Apple
-2. **Better:** Implement silent refresh using Apple's refresh token flow
-3. **Best:** Store refresh token in Keychain, auto-refresh before expiry
-
-**Files:**
-- `AuthenticationManager.swift` - Add refresh logic
-- `APIService.swift` - Add 401 retry with refresh
-
-**Effort:** 2-4 hours
+**Implemented:**
+- Silent token refresh via `ASAuthorizationController` in `AuthenticationManager.swift`
+- 401 interception in `APIService.swift` with automatic retry using refreshed token
+- Concurrent refresh coalescing (multiple 401s trigger only one refresh)
+- Proactive credential state check on app foreground in `NYCFoodRatingsApp.swift`
+- Graceful fallback: if refresh fails, error surfaces normally (no infinite loop)
 
 ---
 
@@ -404,6 +375,16 @@ RestaurantDetailView
 
 ---
 
+#### 21. Account Creation Landing Page
+**Status:** 📋 Planned
+**Goal:** Better onboarding when unauthenticated users try account-only features (e.g. favorites)
+**Current:** Basic sign-in prompt
+**Improvement:** Design a landing page with reasons to create an account (save favorites, track searches, etc.)
+
+**Effort:** 2-4 hours
+
+---
+
 ### Long-Term Roadmap
 
 #### 19. Enhanced Full-Screen Interactive Map
@@ -447,8 +428,9 @@ RestaurantDetailView
 ### Week 2: Reliability
 | # | Task | Priority | Effort |
 |---|------|----------|--------|
+| 4 | ~~Add database indexes~~ | 🟠 P1 | ✅ Done |
+| 7 | ~~Token refresh mechanism~~ | 🟠 P1 | ✅ Done |
 | 6 | Map integration reliability | 🟠 P1 | 2-3 hrs |
-| 7 | Token refresh mechanism | 🟠 P1 | 2-4 hrs |
 | 11 | N+1 query fix | 🟡 P2 | 30 min |
 | 12 | Frontend defensive sorting | 🟢 P3 | 15 min |
 
