@@ -49,21 +49,9 @@ Added indexes for cuisine, boro, location, and grade lookups in Railway PostgreS
 
 ---
 
-### 5. Fix CAST Preventing Index Usage
-**Status:** ⚡ Performance Issue
-**File:** `update_database.py` (line 103)
-
-**Current:**
-```sql
-AND CAST(r.inspection_date AS DATE) = t.inspection_date
-```
-
-**Fix:**
-```sql
-AND r.inspection_date::date = t.inspection_date
-```
-
-**Effort:** 5 minutes
+### 5. ~~Fix CAST Preventing Index Usage~~
+**Status:** ✅ Completed (previously fixed)
+**Impact:** `CAST()` was preventing index usage — already updated to `::date` cast in `update_database.py`.
 
 ---
 
@@ -166,46 +154,17 @@ AND r.inspection_date::date = t.inspection_date
 
 ---
 
-### 11. N+1 Query Fix in Backfill Script
-**Status:** ⚡ Performance Issue
-**File:** `backfill_grade_updates.py` (lines 33-40)
-
-**Current:** Loops through 50K+ restaurants with individual queries
-
-**Fix:** Single query with window function:
-```sql
-WITH grade_sequences AS (
-    SELECT camis, grade,
-           LAG(grade) OVER (PARTITION BY camis ORDER BY inspection_date) as prev_grade
-    FROM restaurants
-)
-SELECT DISTINCT ON (camis) camis, prev_grade, grade
-FROM grade_sequences
-WHERE prev_grade IN ('P', 'Z', 'N') AND grade IN ('A', 'B', 'C')
-```
-
-**Effort:** 30 minutes
+### 11. ~~N+1 Query Fix in Backfill Script~~
+**Status:** ✅ Completed (February 2026)
+**Impact:** Replaced 50K+ individual queries with a single `LAG()` window function query in `backfill_grade_updates.py`.
 
 ---
 
 ## 🟢 P3: LOW PRIORITY - Enhancements
 
-### 12. Frontend Defensive Sorting
-**Status:** 🛡️ Defensive Code
-**Impact:** Ensures correct display even if backend sends unsorted data
-
-**File:** `RecentlyGradedListViewModel.swift` (line 61)
-
-**Add:**
-```swift
-self.recentActivity = actionResults.recently_graded.sorted { r1, r2 in
-    let date1 = r1.finalized_date ?? r1.grade_date ?? "0000-00-00"
-    let date2 = r2.finalized_date ?? r2.grade_date ?? "0000-00-00"
-    return date1 > date2
-}
-```
-
-**Effort:** 15 minutes
+### 12. ~~Frontend Defensive Sorting~~
+**Status:** ✅ Completed (February 2026)
+**Impact:** `RecentlyGradedListViewModel.swift` now sorts by `finalized_date`/`grade_date` client-side as a safety net.
 
 ---
 
@@ -376,7 +335,7 @@ RestaurantDetailView
 | 2 | ~~Grade updates sorting bug~~ | 🔴 P0 | ✅ Done |
 | 3 | ~~Remove pending from filters~~ | 🔴 P0 | ✅ Done |
 | 4 | ~~Add database indexes~~ | 🟠 P1 | ✅ Done |
-| 5 | Fix CAST in update script | 🟠 P1 | 5 min |
+| 5 | ~~Fix CAST in update script~~ | 🟠 P1 | ✅ Done |
 
 ### Week 2: Reliability
 | # | Task | Priority | Effort |
@@ -384,8 +343,8 @@ RestaurantDetailView
 | 4 | ~~Add database indexes~~ | 🟠 P1 | ✅ Done |
 | 7 | ~~Token refresh mechanism~~ | 🟠 P1 | ✅ Done |
 | 6 | Map integration reliability | 🟠 P1 | 2-3 hrs |
-| 11 | N+1 query fix | 🟡 P2 | 30 min |
-| 12 | Frontend defensive sorting | 🟢 P3 | 15 min |
+| 11 | ~~N+1 query fix~~ | 🟡 P2 | ✅ Done |
+| 12 | ~~Frontend defensive sorting~~ | 🟢 P3 | ✅ Done |
 
 ### Week 3-4: User Experience
 | # | Task | Priority | Effort |

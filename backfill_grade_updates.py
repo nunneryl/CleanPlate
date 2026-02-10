@@ -25,29 +25,24 @@ def run_backfill():
     grade_updates_to_insert = []
 
     with DatabaseConnection() as conn, conn.cursor() as cursor:
-        logger.info("Fetching all unique restaurant CAMIS from the database...")
-        cursor.execute("SELECT DISTINCT camis FROM restaurants;")
-        all_camis = [row[0] for row in cursor.fetchall()]
-        logger.info(f"Found {len(all_camis)} unique restaurants to process.")
-
-        for i, camis in enumerate(all_camis):
-            if (i + 1) % 500 == 0:
-                logger.info(f"Processing restaurant {i + 1}/{len(all_camis)}...")
-            
-            cursor.execute(
-                "SELECT grade FROM restaurants WHERE camis = %s ORDER BY inspection_date ASC;",
-                (camis,)
+        logger.info("Finding historical grade transitions with a single query...")
+        cursor.execute("""
+            WITH grade_sequences AS (
+                SELECT camis, grade,
+                       LAG(grade) OVER (PARTITION BY camis ORDER BY inspection_date) AS prev_grade
+                FROM restaurants
             )
-            inspections = cursor.fetchall()
+            SELECT DISTINCT ON (camis) camis, prev_grade, grade
+            FROM grade_sequences
+            WHERE prev_grade IN ('P', 'Z', 'N') AND grade IN ('A', 'B', 'C')
+            ORDER BY camis;
+        """)
+        rows = cursor.fetchall()
+        logger.info(f"Found {len(rows)} historical grade transitions.")
 
-            for j in range(1, len(inspections)):
-                previous_grade = inspections[j-1][0]
-                current_grade = inspections[j][0]
-                
-                if previous_grade in PENDING_GRADES and current_grade in FINAL_GRADES:
-                    logger.info(f"  -> Found historical update for CAMIS {camis}: {previous_grade} -> {current_grade}")
-                    grade_updates_to_insert.append((camis, previous_grade, current_grade))
-                    break
+        for camis, prev_grade, current_grade in rows:
+            logger.info(f"  -> Found historical update for CAMIS {camis}: {prev_grade} -> {current_grade}")
+            grade_updates_to_insert.append((camis, prev_grade, current_grade))
 
         if grade_updates_to_insert:
             logger.info(f"Found a total of {len(grade_updates_to_insert)} historical grade updates. Inserting into the database...")
