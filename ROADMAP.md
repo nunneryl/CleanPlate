@@ -1,6 +1,6 @@
 # CleanPlate Development Roadmap
 
-> **Last Updated:** January 2, 2026
+> **Last Updated:** February 10, 2026
 > **Status:** Active Development
 
 ---
@@ -19,121 +19,39 @@
 
 ## 🔴 P0: CRITICAL BUG FIXES
 
-### 1. Account Deletion Cache Bug
-**Status:** 🐛 Bug Confirmed
+### 1. ~~Account Deletion Cache Bug~~
+**Status:** ✅ Completed
 **Impact:** Users see old favorites after deleting and recreating account
-**Root Cause:** Redis cache not cleared on account deletion
-
-**File:** `app_search.py` (lines 564-579)
-
-**Current Code:**
-```python
-@app.route('/users', methods=['DELETE'])
-def delete_user():
-    # ... validation ...
-    delete_query = "DELETE FROM users WHERE id = %s;"
-    # ... execute ...
-    conn.commit()
-    # ❌ MISSING: cache.delete(f"user_{user_id}_/favorites")
-```
-
-**Fix:** Add after `conn.commit()`:
-```python
-cache.delete(f"user_{user_id}_/favorites")
-```
-
-**Effort:** 5 minutes
+**Root Cause:** Redis cache not cleared on account deletion — fixed by adding `cache.delete()` after account deletion.
 
 ---
 
-### 2. Grade Updates Sorting Bug
-**Status:** 🐛 Bug Confirmed
+### 2. ~~Grade Updates Sorting Bug~~
+**Status:** ✅ Completed
 **Impact:** Recently graded restaurants appear in wrong order; some missed entirely
-**Root Cause:** Sorting by `update_date` (internal metadata) instead of `grade_date` (official date)
-
-**File:** `app_search.py` (lines 376-420)
-
-**Issues:**
-1. `ORDER BY gu.update_date DESC` should be `ORDER BY COALESCE(r.grade_date, r.inspection_date) DESC`
-2. Date filter excludes old inspections with recent grade finalizations
-
-**Current:**
-```sql
-WHERE update_date >= (NOW() - INTERVAL '14 days')
-  AND inspection_date >= (NOW() - INTERVAL '90 days')
-```
-
-**Fix:**
-```sql
-WHERE update_date >= (NOW() - INTERVAL '14 days')
-  AND (inspection_date >= (NOW() - INTERVAL '90 days')
-       OR grade_date >= (NOW() - INTERVAL '14 days'))
-ORDER BY COALESCE(r.grade_date, r.inspection_date) DESC
-```
-
-**Effort:** 30 minutes
+**Root Cause:** Sorting by `update_date` instead of `grade_date` — fixed with `COALESCE` ordering and expanded date filter.
 
 ---
 
-### 3. Remove "Grade Pending" from Recently Graded Filters
-**Status:** 🐛 UX Bug
-**Impact:** Confusing filter option - "Grade Pending" in a list of graded restaurants
-**Location:** iOS `RecentlyGradedListView.swift` filter options
-
-**Fix:** Remove "Pending" option from grade filter picker in the Recently Graded view
-
-**Effort:** 10 minutes
+### 3. ~~Remove "Grade Pending" from Recently Graded Filters~~
+**Status:** ✅ Completed
+**Impact:** Confusing filter option — removed "Pending" from grade filter in Recently Graded view.
 
 ---
 
 ## 🟠 P1: HIGH PRIORITY - Performance & Reliability
 
-### 4. Missing Database Indexes (Critical Performance)
-**Status:** ⚡ Performance Issue
+### 4. ~~Missing Database Indexes (Critical Performance)~~
+**Status:** ✅ Completed (February 2026)
 **Impact:** 3-10x slower queries on main endpoints
 
-**Run these SQL statements immediately:**
-```sql
--- CRITICAL: Violations join (80-90% faster searches)
-CREATE INDEX IF NOT EXISTS idx_violations_camis_inspection_date
-ON violations (camis, inspection_date);
-
--- HIGH: Action column filtering (60-70% faster recent-actions)
-CREATE INDEX IF NOT EXISTS idx_restaurants_action
-ON restaurants (action);
-
--- HIGH: Grade updates time filtering (40-50% faster)
-CREATE INDEX IF NOT EXISTS idx_grade_updates_dates
-ON grade_updates (update_date DESC, inspection_date DESC);
-
--- MEDIUM: Violation pruning
-CREATE INDEX IF NOT EXISTS idx_violations_inspection_date
-ON violations (inspection_date);
-
--- OPTIONAL: Optimize DISTINCT ON queries
-CREATE INDEX IF NOT EXISTS idx_restaurants_camis_inspection_date_desc
-ON restaurants (camis, inspection_date DESC);
-```
-
-**Effort:** 15 minutes to run, immediate improvement
+Added indexes for cuisine, boro, location, and grade lookups in Railway PostgreSQL. Removed unused indexes to save ~30MB.
 
 ---
 
-### 5. Fix CAST Preventing Index Usage
-**Status:** ⚡ Performance Issue
-**File:** `update_database.py` (line 103)
-
-**Current:**
-```sql
-AND CAST(r.inspection_date AS DATE) = t.inspection_date
-```
-
-**Fix:**
-```sql
-AND r.inspection_date::date = t.inspection_date
-```
-
-**Effort:** 5 minutes
+### 5. ~~Fix CAST Preventing Index Usage~~
+**Status:** ✅ Completed (previously fixed)
+**Impact:** `CAST()` was preventing index usage — already updated to `::date` cast in `update_database.py`.
 
 ---
 
@@ -162,22 +80,16 @@ AND r.inspection_date::date = t.inspection_date
 
 ---
 
-### 7. Apple Token Refresh Mechanism
-**Status:** ⚠️ Reliability Issue
-**Impact:** Users may get logged out unexpectedly when token expires
+### 7. ~~Apple Token Refresh Mechanism~~
+**Status:** ✅ Completed (February 2026)
+**Impact:** Users no longer get logged out when Apple identity token expires
 
-**Current:** No token refresh; users must re-authenticate when token expires
-
-**Fix Options:**
-1. **Quick:** Detect 401 responses, prompt re-auth with Apple
-2. **Better:** Implement silent refresh using Apple's refresh token flow
-3. **Best:** Store refresh token in Keychain, auto-refresh before expiry
-
-**Files:**
-- `AuthenticationManager.swift` - Add refresh logic
-- `APIService.swift` - Add 401 retry with refresh
-
-**Effort:** 2-4 hours
+**Implemented:**
+- Silent token refresh via `ASAuthorizationController` in `AuthenticationManager.swift`
+- 401 interception in `APIService.swift` with automatic retry using refreshed token
+- Concurrent refresh coalescing (multiple 401s trigger only one refresh)
+- Proactive credential state check on app foreground in `NYCFoodRatingsApp.swift`
+- Graceful fallback: if refresh fails, error surfaces normally (no infinite loop)
 
 ---
 
@@ -242,46 +154,17 @@ AND r.inspection_date::date = t.inspection_date
 
 ---
 
-### 11. N+1 Query Fix in Backfill Script
-**Status:** ⚡ Performance Issue
-**File:** `backfill_grade_updates.py` (lines 33-40)
-
-**Current:** Loops through 50K+ restaurants with individual queries
-
-**Fix:** Single query with window function:
-```sql
-WITH grade_sequences AS (
-    SELECT camis, grade,
-           LAG(grade) OVER (PARTITION BY camis ORDER BY inspection_date) as prev_grade
-    FROM restaurants
-)
-SELECT DISTINCT ON (camis) camis, prev_grade, grade
-FROM grade_sequences
-WHERE prev_grade IN ('P', 'Z', 'N') AND grade IN ('A', 'B', 'C')
-```
-
-**Effort:** 30 minutes
+### 11. ~~N+1 Query Fix in Backfill Script~~
+**Status:** ✅ Completed (February 2026)
+**Impact:** Replaced 50K+ individual queries with a single `LAG()` window function query in `backfill_grade_updates.py`.
 
 ---
 
 ## 🟢 P3: LOW PRIORITY - Enhancements
 
-### 12. Frontend Defensive Sorting
-**Status:** 🛡️ Defensive Code
-**Impact:** Ensures correct display even if backend sends unsorted data
-
-**File:** `RecentlyGradedListViewModel.swift` (line 61)
-
-**Add:**
-```swift
-self.recentActivity = actionResults.recently_graded.sorted { r1, r2 in
-    let date1 = r1.finalized_date ?? r1.grade_date ?? "0000-00-00"
-    let date2 = r2.finalized_date ?? r2.grade_date ?? "0000-00-00"
-    return date1 > date2
-}
-```
-
-**Effort:** 15 minutes
+### 12. ~~Frontend Defensive Sorting~~
+**Status:** ✅ Completed (February 2026)
+**Impact:** `RecentlyGradedListViewModel.swift` now sorts by `finalized_date`/`grade_date` client-side as a safety net.
 
 ---
 
@@ -404,6 +287,16 @@ RestaurantDetailView
 
 ---
 
+#### 21. Account Creation Landing Page
+**Status:** 📋 Planned
+**Goal:** Better onboarding when unauthenticated users try account-only features (e.g. favorites)
+**Current:** Basic sign-in prompt
+**Improvement:** Design a landing page with reasons to create an account (save favorites, track searches, etc.)
+
+**Effort:** 2-4 hours
+
+---
+
 ### Long-Term Roadmap
 
 #### 19. Enhanced Full-Screen Interactive Map
@@ -438,19 +331,20 @@ RestaurantDetailView
 ### Week 1: Critical Fixes
 | # | Task | Priority | Effort |
 |---|------|----------|--------|
-| 1 | Account deletion cache bug | 🔴 P0 | 5 min |
-| 2 | Grade updates sorting bug | 🔴 P0 | 30 min |
-| 3 | Remove pending from filters | 🔴 P0 | 10 min |
-| 4 | Add database indexes | 🟠 P1 | 15 min |
-| 5 | Fix CAST in update script | 🟠 P1 | 5 min |
+| 1 | ~~Account deletion cache bug~~ | 🔴 P0 | ✅ Done |
+| 2 | ~~Grade updates sorting bug~~ | 🔴 P0 | ✅ Done |
+| 3 | ~~Remove pending from filters~~ | 🔴 P0 | ✅ Done |
+| 4 | ~~Add database indexes~~ | 🟠 P1 | ✅ Done |
+| 5 | ~~Fix CAST in update script~~ | 🟠 P1 | ✅ Done |
 
 ### Week 2: Reliability
 | # | Task | Priority | Effort |
 |---|------|----------|--------|
+| 4 | ~~Add database indexes~~ | 🟠 P1 | ✅ Done |
+| 7 | ~~Token refresh mechanism~~ | 🟠 P1 | ✅ Done |
 | 6 | Map integration reliability | 🟠 P1 | 2-3 hrs |
-| 7 | Token refresh mechanism | 🟠 P1 | 2-4 hrs |
-| 11 | N+1 query fix | 🟡 P2 | 30 min |
-| 12 | Frontend defensive sorting | 🟢 P3 | 15 min |
+| 11 | ~~N+1 query fix~~ | 🟡 P2 | ✅ Done |
+| 12 | ~~Frontend defensive sorting~~ | 🟢 P3 | ✅ Done |
 
 ### Week 3-4: User Experience
 | # | Task | Priority | Effort |
