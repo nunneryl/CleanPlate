@@ -222,13 +222,37 @@ def update_database_batch(data):
             logger.info(f"Grade updates insert executed. Affected rows: {u_count}")
 
         conn.commit()
-    return r_count, v_count, u_count
+    return r_count, v_count, u_count, grade_updates_to_insert, violations_to_insert
+
+
+def _detect_reopened_restaurants(data):
+    """Detect restaurants whose action changed to re-opened in this update batch."""
+    reopened = []
+    for item in data:
+        action = item.get("action", "")
+        if action and "re-opened" in action.lower():
+            camis = item.get("camis")
+            if camis and camis not in reopened:
+                reopened.append(camis)
+    return reopened
+
+
 def run_database_update(days_back=3):
     logger.info(f"Starting DB update (days_back={days_back})")
     data = fetch_data(days_back)
     if data:
-        r_upd, v_ins, u_ins = update_database_batch(data)
+        r_upd, v_ins, u_ins, grade_updates, new_violations = update_database_batch(data)
         logger.info(f"Update complete. Total Restaurants processed: {r_upd}, Total Violations: {v_ins}, Total Grade Updates: {u_ins}")
+
+        # --- Send push notifications for changes to favorited restaurants ---
+        try:
+            from notifications import send_notifications_for_updates
+            reopened = _detect_reopened_restaurants(data)
+            send_notifications_for_updates(grade_updates, new_violations, reopened)
+        except ImportError:
+            logger.info("Notifications module not available, skipping push notifications.")
+        except Exception as e:
+            logger.error(f"Failed to send push notifications: {e}", exc_info=True)
     else:
         logger.warning("No data from API.")
     logger.info("DB update finished.")

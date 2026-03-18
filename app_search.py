@@ -568,6 +568,52 @@ def remove_favorite(camis):
         logger.error(f"Failed to delete favorite for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Database operation failed"}), 500
 
+@app.route('/push-tokens', methods=['POST'])
+def register_push_token():
+    user_id, error_response, status_code = _get_user_id_from_token(request)
+    if error_response: return error_response, status_code
+    if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
+    data = request.get_json()
+    device_token = data.get('device_token')
+    if not device_token or not device_token.strip():
+        return jsonify({"error": "device_token is required"}), 400
+    try:
+        with DatabaseConnection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO user_push_tokens (user_id, device_token, updated_at)
+                       VALUES (%s, %s, NOW())
+                       ON CONFLICT (user_id, device_token) DO UPDATE SET updated_at = NOW()""",
+                    (user_id, device_token.strip()),
+                )
+            conn.commit()
+        return jsonify({"status": "success", "message": "Push token registered."}), 201
+    except Exception as e:
+        logger.error(f"Failed to register push token for user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Database operation failed"}), 500
+
+@app.route('/push-tokens', methods=['DELETE'])
+def unregister_push_token():
+    user_id, error_response, status_code = _get_user_id_from_token(request)
+    if error_response: return error_response, status_code
+    if not request.is_json: return jsonify({"error": "Request must be JSON"}), 400
+    data = request.get_json()
+    device_token = data.get('device_token')
+    if not device_token:
+        return jsonify({"error": "device_token is required"}), 400
+    try:
+        with DatabaseConnection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM user_push_tokens WHERE user_id = %s AND device_token = %s",
+                    (user_id, device_token.strip()),
+                )
+            conn.commit()
+        return jsonify({"status": "success", "message": "Push token removed."}), 200
+    except Exception as e:
+        logger.error(f"Failed to unregister push token for user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Database operation failed"}), 500
+
 @app.route('/users', methods=['DELETE'])
 def delete_user():
     user_id, error_response, status_code = _get_user_id_from_token(request)

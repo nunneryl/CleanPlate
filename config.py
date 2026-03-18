@@ -47,6 +47,14 @@ class APIConfig:
     UPDATE_SECRET_KEY = os.environ.get("UPDATE_SECRET_KEY", None)
     API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8080")
 
+# APNs Push Notification configuration
+class APNsConfig:
+    KEY_ID = os.environ.get("APNS_KEY_ID")
+    TEAM_ID = os.environ.get("APNS_TEAM_ID")
+    KEY_CONTENT = os.environ.get("APNS_KEY_CONTENT")  # p8 key content
+    BUNDLE_ID = "nunzo.CleanPlate"
+    USE_SANDBOX = os.environ.get("APNS_USE_SANDBOX", "false").lower() == "true"
+
 # Redis configuration
 class RedisConfig:
     HOST = os.environ.get("REDISHOST", "localhost")

@@ -135,3 +135,35 @@ CREATE INDEX IF NOT EXISTS idx_recent_searches_user_id ON recent_searches (user_
 -- Grade updates indexes
 CREATE INDEX IF NOT EXISTS idx_grade_updates_restaurant ON grade_updates (restaurant_camis, inspection_date);
 CREATE INDEX IF NOT EXISTS idx_grade_updates_date ON grade_updates (update_date);
+
+-- ============================================================================
+-- USER PUSH TOKENS TABLE
+-- Stores APNs device tokens for push notification delivery
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS user_push_tokens (
+    id SERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_token TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, device_token)
+);
+
+-- ============================================================================
+-- NOTIFICATION HISTORY TABLE
+-- Tracks sent notifications for deduplication and audit
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS notification_history (
+    id SERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    restaurant_camis VARCHAR NOT NULL,
+    notification_type VARCHAR NOT NULL,
+    message TEXT,
+    sent_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+-- Push notification indexes
+CREATE INDEX IF NOT EXISTS idx_push_tokens_user_id ON user_push_tokens (user_id);
+CREATE INDEX IF NOT EXISTS idx_push_tokens_device_token ON user_push_tokens (device_token);
+CREATE INDEX IF NOT EXISTS idx_notification_history_user_id ON notification_history (user_id);
+CREATE INDEX IF NOT EXISTS idx_notification_history_dedup ON notification_history (user_id, restaurant_camis, notification_type, sent_at);
