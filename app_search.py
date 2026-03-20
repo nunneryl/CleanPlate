@@ -791,6 +791,43 @@ def trigger_update():
     threading.Thread(target=run_database_update, args=(15,), daemon=True).start()
     return jsonify({"status": "success", "message": "Database update triggered in background."}), 202
 
+@app.route('/test-notification', methods=['POST'])
+def test_notification():
+    """Send a test push notification to verify APNs is working."""
+    provided_key = request.headers.get('X-Update-Secret')
+    expected_key = APIConfig.UPDATE_SECRET_KEY
+    if not expected_key or not provided_key or not secrets.compare_digest(provided_key, expected_key):
+        return jsonify({"status": "error", "message": "Unauthorized."}), 403
+
+    from notifications import _send_apns_notification
+
+    # Find all registered device tokens
+    try:
+        with DatabaseConnection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                user_id = request.args.get('user_id')
+                if user_id:
+                    cursor.execute("SELECT device_token, user_id FROM user_push_tokens WHERE user_id = %s", (user_id,))
+                else:
+                    cursor.execute("SELECT device_token, user_id FROM user_push_tokens")
+                tokens = cursor.fetchall()
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"DB error: {e}"}), 500
+
+    if not tokens:
+        return jsonify({"status": "error", "message": "No device tokens found. Make sure you registered for push notifications in the app."}), 404
+
+    results = []
+    for row in tokens:
+        success = _send_apns_notification(
+            row["device_token"],
+            "CleanPlate Test",
+            "Push notifications are working!",
+        )
+        results.append({"user_id": row["user_id"], "token": row["device_token"][:16] + "...", "sent": success})
+
+    return jsonify({"status": "success", "results": results}), 200
+
 @app.route('/clear-cache', methods=['POST'])
 def clear_cache():
     provided_key = request.headers.get('X-Update-Secret')
